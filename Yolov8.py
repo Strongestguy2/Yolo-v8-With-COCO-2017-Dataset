@@ -21,8 +21,29 @@ EXP_NAME  = "yolov8_coco_proto"
 RUN_NAME  = f"{timestamp}_{EXP_NAME}"
 RUN_DIR   = os.path.join(DIRS["runs"], RUN_NAME)
 os.makedirs(RUN_DIR, exist_ok=True)
-
+FO_CACHE_DIR = "/content/fo_cache"
+fo.config.default_dataset_dir = FO_CACHE_DIR
+os.makedirs(FO_CACHE_DIR, exist_ok=True)
 DATASET_YAML = os.path.join(DIRS["configs"], "dataset.yaml")
+VAL_DS_NAME  = "coco2017_val500_fixed"
+VAL_TXT = os.path.join(DIRS["datasets"], "val_filepaths.txt")
+
+if not os.path.exists(VAL_TXT):
+    ds_val = foz.load_zoo_dataset(
+        "coco-2017",
+        splits=["validation"],
+        label_types=["detections"],
+        max_samples=500,
+        shuffle=True,
+        seed=1234,
+        dataset_name=VAL_DS_NAME,
+        drop_existing=True,
+    )
+    with open(VAL_TXT, "w") as f:
+        for s in ds_val:
+            f.write(s.filepath + "\n")
+else:
+    pass
 
 META = {
   "BASE_DIR": BASE_DIR,
@@ -123,28 +144,31 @@ fo.config.default_dataset_dir = os.path.join(DIRS["datasets"], "fo_cache")
 ds = fo.load_dataset("coco2017_index")   # fast if you’ve already run Cell 4a once
 #lite version, run this on startup
 
+import time
+DS_TRAIN_ROLL = "coco2017_train_roll2k"
+TARGET = 2000
 
-#for downloading
-print("FiftyOne:", fo.__version__)
-
-FO_CACHE_DIR = os.path.join(DIRS["datasets"], "fo_cache")
-fo.config.default_dataset_dir = FO_CACHE_DIR
-os.makedirs(FO_CACHE_DIR, exist_ok=True)
-
-DS_NAME = "coco2017_index"
-MAX_SAMPLES = 2000
-
-# This creates/loads the listing; it doesn't force-download all media
-ds = foz.load_zoo_dataset(
-    "coco-2017",
-    splits=["train","validation"],
-    label_types=["detections"],
-    max_samples=MAX_SAMPLES,
-    shuffle=False,
-    dataset_name=DS_NAME,
-    drop_existing=False,
-)
-print(ds.count_values("tags"))
+def load_next_train_chunk(seen_paths, tries=6):
+    for _ in range(tries):
+        seed = int(time.time()) % 2_000_000_000
+        ds = foz.load_zoo_dataset(
+            "coco-2017",
+            splits=["train"],
+            label_types=["detections"],
+            max_samples=TARGET,
+            shuffle=True,
+            seed=seed,
+            dataset_name=DS_TRAIN_ROLL,
+            drop_existing=True,
+        )
+        fresh = ds.exclude(filepath=list(seen_paths))
+        n = len(fresh)
+        if n >= int(0.9 * TARGET):
+            print(f"Using train chunk with {n} fresh samples (seed={seed})")
+            return fresh
+        print(f"Overlap too high ({n} fresh). Retrying...")
+    print(f"Proceeding with {n} fresh after retries")
+    return fresh
 
 
 #after 4a heavy
@@ -208,10 +232,16 @@ COCO_NAMES = [
 ]
 name_to_idx = {n:i for i,n in enumerate(COCO_NAMES)}
 
-def detections_field(dataset):
-    for f, info in dataset.get_field_schema().items():
-        if info is fo.core.labels.Detections:
-            return f
+def detections_field (dataset):
+    schema = dataset.get_field_schema ()
+    for name, field in schema.items ():
+        if hasattr (field, "document_type"):
+            try:
+                import fiftyone.core.labels as fol
+                if field.document_type is fol.Detections:
+                    return name
+            except Exception:
+                pass
     return "ground_truth"
 
 def _clean_dir(pat_list):
@@ -277,9 +307,9 @@ if val_chunk is not None:
     symlink_and_write_labels(val_chunk, "val")
 
 #RUN AFTER TRAINING , RUN WITH CAUTION!!!!!!!!!!
-import shutil
+import shutil, os
 
-def dispose_current_chunk(delete_from_cache=True, mark_seen=True):
+def _reset_working_set():
     shutil.rmtree("/content/yolo_data", ignore_errors=True)
     for p in [
         "/content/yolo_data/images/train",
@@ -289,20 +319,31 @@ def dispose_current_chunk(delete_from_cache=True, mark_seen=True):
     ]:
         os.makedirs(p, exist_ok=True)
 
-    if delete_from_cache and os.path.exists(CURR_CHUNK_TXT):
+def _safe_remove_media(paths, root=FO_CACHE_DIR):
+    deleted = missing = skipped = 0
+    root_abs = os.path.abspath(root) + os.sep
+    for p in paths:
+        ap = os.path.abspath(p)
+        if not ap.startswith(root_abs):
+            skipped += 1
+            continue
+        try:
+            os.remove(ap); deleted += 1
+        except FileNotFoundError:
+            missing += 1
+        except Exception as e:
+            print("Delete error:", ap, e)
+    print(f"Cache cleanup: deleted {deleted}, missing {missing}, skipped {skipped}")
+
+def dispose_current_chunk(delete_from_cache=True, mark_seen=True):
+    _reset_working_set()
+
+    if os.path.exists(CURR_CHUNK_TXT):
         with open(CURR_CHUNK_TXT, "r") as f:
             paths = [l.strip() for l in f if l.strip()]
-        deleted, missing = 0, 0
-        for p in paths:
-            try:
-                os.remove(p)
-                deleted += 1
-            except FileNotFoundError:
-                missing += 1
-            except Exception as e:
-                print("Delete error:", p, e)
 
-        print(f"Cache cleanup: deleted {deleted}, missing {missing}")
+        if delete_from_cache and paths:
+            _safe_remove_media(paths, root=FO_CACHE_DIR)
 
         if mark_seen and paths:
             _append_seen(paths)
