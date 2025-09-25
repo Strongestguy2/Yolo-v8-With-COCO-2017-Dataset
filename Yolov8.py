@@ -1,6 +1,6 @@
 # i hate to set things up, but here i am doing all these stuff before training the model dammnit
 #have to run
-%pip -q install fiftyone
+# %pip -q install fiftyone
 import fiftyone as fo
 import fiftyone.zoo as foz
 import os, json, sys
@@ -382,7 +382,7 @@ def dispose_current_chunk(delete_from_cache=True, mark_seen=True):
     print("Disposed current chunk.")
 
 
-Stage 3
+#Stage 3
 
 #still preparing, let me cook
 def set_seed (seed = 42):
@@ -576,11 +576,11 @@ class YoloDataset (Dataset):
         }
         return image, target
 
+#-----
 #colate function and dataloaders
 import os
 def collate_fn (batch):
     images, targets = list (zip (*batch))
-    B = len (images)
     images = torch.stack (images, dim = 0)
 
     all_boxes = []
@@ -589,35 +589,38 @@ def collate_fn (batch):
     image_ids = []
     scales = []
     pads = []
+    orig_sizes = []
 
-    for i, t in enumerate (targets):
-        n = t ["boxes"].shape [0]
+    for i, target in enumerate (targets):
+        num_boxes = target ["boxes"].shape [0]
 
-        if n:
-            all_boxes.append (t ["boxes"])
-            all_labels.append (t ["labels"])
-            all_bidx.append (torch.full ((n,), i, dtype = torch.int64))
+        if num_boxes:
+            all_boxes.append (target ["boxes"])
+            all_labels.append (target ["labels"])
+            all_bidx.append (torch.full ((num_boxes,), i, dtype = torch.int64))
 
-        image_ids.append (t ["image_id"])
-        scales.append (t ["scale"])
-        pads.append (t ["pad"])
+        image_ids.append (target ["image_id"])
+        scales.append (target ["scale"])
+        pads.append (target ["pad"])
+        orig_sizes.append (target ["orig_size"])
 
     if len (all_boxes):
         boxes = torch.cat (all_boxes, 0)
         labels = torch.cat (all_labels, 0)
-        bidx = torch.cat (all_bidx, 0)
+        batch_index = torch.cat (all_bidx, 0)
     else:
         boxes = torch.zeros ((0, 4), dtype = torch.float32)
         labels = torch.zeros ((0,), dtype = torch.int64)
-        bidx = torch.zeros ((0,), dtype = torch.int64)
+        batch_index = torch.zeros ((0,), dtype = torch.int64)
 
     return images, {
         "boxes": boxes,
         "labels": labels,
-        "batch_index": bidx,
+        "batch_index": batch_index,
         "image_id": image_ids,
         "scale": scales,
         "pad": pads,
+        "orig_size": orig_sizes,
     }
 
 def _wif (worker_id):
@@ -856,7 +859,7 @@ print("✅ Sanity check done.")
 # ==== END SANITY CHECK ====
 
 
-Stage 4: Finally the actual model, Backbone
+#Stage 4: Finally the actual model, Backbone
 
 
 #the fun part - backbone and fpn finally!!!!!!!!!!
@@ -1036,6 +1039,7 @@ class YoloModel (nn.Module):
 
 #forward smoke test
 model = YoloModel (num_classes = CFG ["num_classes"], backbone = CFG ["backbone"], head_hidden = CFG ["head_hidden"], fpn_out = 256).to (device)
+model.criterion = criterion
 
 x = torch.randn (2, 3, CFG ["imgsz"], CFG ["imgsz"], device = device)
 with torch.no_grad ():
@@ -1046,7 +1050,7 @@ print ("Levels:", len (out ["features"]))
 for i, (c, b) in enumerate (zip (out ["cls"], out ["box"])):
     print (f"Level {i}: cls: {tuple (c.shape)}, box: {tuple (b.shape)}, stride: {model.strides [i]}")
 
-Stage 5
+#Stage 5
 
 
 #forward pass
@@ -1180,7 +1184,7 @@ print (f"[SMOKE] got {len(dets)} detection lists for batch size {xbv.shape [0]}"
 for i, d in enumerate (dets [:2]):
     print(f" img{i}: boxes {tuple (d ['boxes'].shape)}  scores {tuple (d ['scores'].shape)}  classes {tuple(d['classes'].shape)}")
 
-Stage 6
+#Stage 6
 
 
 #box ops (IoU)
@@ -1416,36 +1420,41 @@ criterion = DetectionLoss (
 
 optimizer, scheduler = build_optimizer (model, CFG)
 
-def train_step(model, batch, device):
-    model.train()
+def train_step (model, batch, device):
+    model.train ()
     images, targets = batch
-    images = images.to(device, non_blocking=True)
+    images = images.to (device, non_blocking = True)
 
-    optimizer.zero_grad(set_to_none=True)
+    optimizer.zero_grad (set_to_none = True)
 
-    with torch.cuda.amp.autocast(enabled=CFG.get("amp", True)):
-        out = model(images, targets)         # your forward that returns losses
-        loss = out["loss"]                   # keep your keys
-        loss_box = out["loss_box"]
-        loss_cls = out["loss_cls"]
-        num_pos  = out["num_pos"]
+    with torch.cuda.amp.autocast (enabled = CFG.get ("amp", True)):
+        out = model (images, targets)
+        loss = out ["loss"]
+        loss_box = out.get ("loss_box", 0.0)
+        loss_cls = out.get ("loss_cls", 0.0)
+        num_pos = out.get ("num_pos", 0.0)
 
-    # backward + (optional) clip + step
-    scaler.scale(loss).backward()
+        if not torch.is_tensor (loss_box):
+            loss_box = torch.as_tensor (loss_box, device = loss.device, dtype = loss.dtype)
+        if not torch.is_tensor (loss_cls):
+            loss_cls = torch.as_tensor (loss_cls, device = loss.device, dtype = loss.dtype)
+        if not torch.is_tensor (num_pos):
+            num_pos = torch.as_tensor (num_pos, device = loss.device, dtype = loss.dtype)
 
-    if CFG.get("grad_clip_norm", None):
-        # unscale *once* here
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), CFG["grad_clip_norm"])
+    scaler.scale (loss).backward ()
 
-    scaler.step(optimizer)   # moves weights
-    scaler.update()
+    if CFG.get ("grad_clip_norm", None):
+        scaler.unscale_ (optimizer)
+        torch.nn.utils.clip_grad_norm_ (model.parameters (), CFG ["grad_clip_norm"])
+
+    scaler.step (optimizer)
+    scaler.update ()
 
     stats = {
-        "loss": float(loss.detach().item()),
-        "loss_box": float(loss_box.detach().item()),
-        "loss_cls": float(loss_cls.detach().item()),
-        "num_pos": float(num_pos),
+        "loss": float (loss.detach ().item ()),
+        "loss_box": float (loss_box.detach ().item ()),
+        "loss_cls": float (loss_cls.detach ().item ()),
+        "num_pos": float (num_pos.detach ().item ())
     }
     return stats
 
@@ -1505,7 +1514,7 @@ for epoch in range (3):
     scheduler.step ()
     print (f"epoch {epoch+1} done, avg loss = {sum (history) / len (history):.4f}, time = {time.time () - t0:.2f}s")
 
-Stage 7
+#Stage 7
 
 
 #loader builders
@@ -1534,22 +1543,10 @@ VAL_LBL_DIR = os.path.join (CFG ["data_root"], CFG ["val_lbl_dir"])
 val_ds, val_loader = build_loader (VAL_IMG_DIR, VAL_LBL_DIR, CFG, shuffle = False)
 print ("val size:", len (val_ds))
 
+#-----
 #coco mAP eval
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
-
-def undo_letterbox_to_original (xyxy, pad, scale, original_size):
-    px, py = pad
-    x1 = (xyxy [..., 0] - px) / scale
-    y1 = (xyxy [..., 1] - py) / scale
-    x2 = (xyxy [..., 2] - px) / scale
-    y2 = (xyxy [..., 3] - py) / scale
-    H, W = original_size
-    x1.clamp_ (0, W - 1)
-    x2.clamp_ (0, W - 1)
-    y1.clamp_ (0, H - 1)
-    y2.clamp_ (0, H - 1)
-    return torch.stack ([x1, y1, x2, y2], dim = 1)
 
 def _image_size_from_stem (stem):
     #try common image extensions
@@ -1574,7 +1571,7 @@ def evaluate_map_coco (model, val_loader, device, imgsz = 640, score_thresh = 0.
         lp = os.path.join (VAL_LBL_DIR, stem + ".txt")
 
         if os.path.exists (lp):
-            arr = val_loader.dataset._read_label (lp)
+            arr = val_loader.dataset._read_labels (lp)
             if arr.size:
                 boxes, cls = yolo_to_xyxy (arr, W, H)
                 for j , (x1, y1, x2, y2) in enumerate (boxes):
@@ -1597,27 +1594,38 @@ def evaluate_map_coco (model, val_loader, device, imgsz = 640, score_thresh = 0.
     model.eval ()
     for images, targets in val_loader:
         images = images.to (device, non_blocking = True)
-        outs = model_inference_step (model, images, image_size = imgsz, score_thresh = score_thresh, iou_thresh = 0.7, max_det = 300)
+        outs = model_inference_step (
+            model,
+            images,
+            image_size = imgsz,
+            score_thresh = score_thresh,
+            iou_thresh = 0.7,
+            max_det = 300,
+        )
 
-        for b, det in enumerate (outs):
-            stem = targets ["image_id"]
+        for batch_index, det in enumerate (outs):
+            stem = targets ["image_id"][batch_index]
             image_index = val_loader.dataset.stems.index (stem)
-            H, W = targets ["original_size"] [b]
-            scale = targets ["scale"][b]
-            pad = targets ["pad"][b]
+            H, W = targets ["orig_size"][batch_index]
+            scale = targets ["scale"][batch_index]
+            pad = targets ["pad"][batch_index]
+
             if det ["boxes"].numel () == 0:
                 continue
-            bx_original = undo_letterbox_to_original (det ["boxes"].clone (), pad, scale, (H, W))
-            sc = det ["scores"].tolist ()
-            cl = det ["classes"].tolist ()
 
-            for k in range (bx_original.shape [0]):
-                x1, y1, x2, y2 = bx_original [k].tolist ()
+            boxes_original = undo_letterbox_to_orig (
+                det ["boxes"].clone (), pad, scale, (H, W)
+            )
+            scores = det ["scores"].tolist ()
+            classes = det ["classes"].tolist ()
+
+            for prediction_index in range (boxes_original.shape [0]):
+                x1, y1, x2, y2 = boxes_original [prediction_index].tolist ()
                 dets_json.append ({
                     "image_id": image_index,
-                    "category_id": int (cl [k]),
+                    "category_id": int (classes [prediction_index]),
                     "bbox": [x1, y1, x2 - x1, y2 - y1],
-                    "score": float (sc [k]),
+                    "score": float (scores [prediction_index]),
                 })
 
     if len (dets_json):
