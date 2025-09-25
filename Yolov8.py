@@ -988,7 +988,7 @@ class YoloV8LiteHead (nn.Module):
         return cls_outs, box_outs
 
 class YoloModel (nn.Module):
-    def __init__ (self, num_classes = 80, backbone = "resnet50_fpn", head_hidden = 256, fpn_out = 256):
+    def __init__ (self, num_classes = 80, backbone = "resnet50_fpn", head_hidden = 256, fpn_out = 256, criterion = None):
         super ().__init__ ()
         assert backbone == "resnet50_fpn", "only resnet50_fpn wired in this mvp"
         self.backbone = ResNet50Backbone (pretrained = False)
@@ -996,6 +996,7 @@ class YoloModel (nn.Module):
         self.neck = FPN (c3 = 512, c4 = 1024, c5 = 2048, out_ch = fpn_out)
         self.head = YoloV8LiteHead (in_ch = fpn_out, num_classes = num_classes, hidden = head_hidden, num_levels  = 3)
         self.strides = [8, 16, 32]
+        self.criterion = criterion
 
     def forward(self, x, targets=None):
       c3, c4, c5 = self.backbone(x)
@@ -1036,19 +1037,6 @@ class YoloModel (nn.Module):
       # Inference path: return raw predictions
       return head_out
 
-
-#forward smoke test
-model = YoloModel (num_classes = CFG ["num_classes"], backbone = CFG ["backbone"], head_hidden = CFG ["head_hidden"], fpn_out = 256).to (device)
-model.criterion = criterion
-
-x = torch.randn (2, 3, CFG ["imgsz"], CFG ["imgsz"], device = device)
-with torch.no_grad ():
-    out = model (x)
-
-print ("Levels:", len (out ["features"]))
-
-for i, (c, b) in enumerate (zip (out ["cls"], out ["box"])):
-    print (f"Level {i}: cls: {tuple (c.shape)}, box: {tuple (b.shape)}, stride: {model.strides [i]}")
 
 #Stage 5
 
@@ -1410,13 +1398,44 @@ def build_optimizer (model, cfg):
 
 scaler = GradScaler (enabled = CFG ["amp"])
 
-criterion = DetectionLoss (
-    num_classes = CFG ["num_classes"],
-    image_size = CFG ["imgsz"],
-    strides = [8, 16, 32],
-    lambda_box = CFG ["loss_weights"] ["box"],
-    lambda_cls = CFG ["loss_weights"] ["cls"],
-)
+def build_model(cfg = CFG, device_arg = device):
+    """Construct a ``YoloModel`` along with its loss criterion.
+
+    Keeping the helper makes it easy for external scripts (like ``YoloMain``)
+    to import this module and request a fresh model instance without relying
+    on globals that may or may not have executed yet.
+    """
+
+    criterion = DetectionLoss (
+        num_classes = cfg ["num_classes"],
+        image_size = cfg ["imgsz"],
+        strides = [8, 16, 32],
+        lambda_box = cfg ["loss_weights"] ["box"],
+        lambda_cls = cfg ["loss_weights"] ["cls"],
+    )
+
+    model = YoloModel (
+        num_classes = cfg ["num_classes"],
+        backbone = cfg ["backbone"],
+        head_hidden = cfg ["head_hidden"],
+        fpn_out = 256,
+        criterion = criterion,
+    ).to (device_arg)
+
+    return model, criterion
+
+
+model, criterion = build_model ()
+
+#forward smoke test
+x = torch.randn (2, 3, CFG ["imgsz"], CFG ["imgsz"], device = device)
+with torch.no_grad ():
+    out = model (x)
+
+print ("Levels:", len (out ["features"]))
+
+for i, (c, b) in enumerate (zip (out ["cls"], out ["box"])):
+    print (f"Level {i}: cls: {tuple (c.shape)}, box: {tuple (b.shape)}, stride: {model.strides [i]}")
 
 optimizer, scheduler = build_optimizer (model, CFG)
 
