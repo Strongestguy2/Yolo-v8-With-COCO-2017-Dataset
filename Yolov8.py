@@ -88,6 +88,7 @@ CFG = {
     "save_period": 1,
     "resume": True,
     "seed": 42,
+    "viz_every": 200,
 
     "data_root": "/content/yolo_data",
     "train_img_dir": "images/train",
@@ -784,7 +785,7 @@ try:
 
     xb, tb = next(iter(_train_loader))
     print("[DL] train batch images:", tuple(xb.shape), xb.dtype)
-    for k in ("boxes","labels","batch_idx"):
+    for k in ("boxes","labels","batch_index"):
         print(f"[DL] train targets[{k}]:", tuple(tb[k].shape) if hasattr(tb[k], "shape") else type(tb[k]))
 
     xbv, tbv = next(iter(_val_loader))
@@ -818,7 +819,7 @@ def show_batch(images, targets, num=4, size=CFG["imgsz"], title="train"):
         img = images[i].numpy().transpose(1,2,0)  # CHW->HWC
         img = (np.clip(img,0,1)*255).astype(np.uint8)
         # collect boxes for this image
-        mask = (targets["batch_idx"]==i)
+        mask = (targets["batch_index"]==i)
         boxes = targets["boxes"][mask].cpu().numpy() if torch.is_tensor(targets["boxes"]) else np.zeros((0,4))
         labels = targets["labels"][mask].cpu().numpy() if torch.is_tensor(targets["labels"]) else np.zeros((0,),dtype=int)
 
@@ -1022,7 +1023,7 @@ import torch
 def make_grid (features_h, features_w, stride, device):
     #return grid centers in input/letterbox ccoords
     #centes x and centers y both already multiplied by stride
-    
+
     ys = torch.arange (features_h, device = device)
     xs = torch.arange (features_w, device = device)
     yy, xx = torch.meshgrid (ys, xs, indexing = "ij") #hxw
@@ -1034,7 +1035,7 @@ def decode_letterbox_to_xyzy (letterbox, centers_x, centers_y):
     #(n, 4), ltrb in letterbox coords
     #(n,) centers x and y in input coords
     #returns xyxy: (n, 4)
-    
+
     l, t, r, b = letterbox.unbind (-1)
     x1 = centers_x - l
     y1 = centers_y - t
@@ -1051,36 +1052,36 @@ def flatten_head_outputs (cls_outs, box_outs, strides, image_size):
     device = cls_outs [0].device
     all_scores = [[] for _ in range (B)]
     all_boxes = [[] for _ in range (B)]
-    
+
     for level, (cl, bx, s) in enumerate (zip (cls_outs, box_outs, strides)):
         B_, C, H, W = cl.shape
         assert B_ == B
         cl = cl.permute (0, 2, 3, 1).reshape (B, H * W, C)
         bx = bx.permute (0, 2, 3, 1).reshape (B, H * W, 4)
-        
+
         cx, cy = make_grid (H, W, s, device)
         #exp to (B, HW)
         cx = cx.unsqueeze (0).expand (B, -1)
         cy = cy.unsqueeze (0).expand (B, -1)
-        
+
         #decode
         for i in range (B):
             xyxy = decode_letterbox_to_xyzy (bx [i], cx [i], cy [i])
-            
+
             xyxy [..., 0::2].clamp_ (0, image_size)
             xyxy [..., 1::2].clamp_ (0, image_size)
             #(hw,c)
             all_boxes [i].append (xyxy)
             #(hw, 4)
             all_scores [i].append (cl [i])
-            
+
     #concat levels
     for i in range (B):
         all_boxes [i] = torch.cat (all_boxes [i], dim = 0)
         all_scores [i] = torch.cat (all_scores [i], dim = 0)
-        
+
     return all_scores, all_boxes
-    
+
 
 import torch
 import torchvision.ops as nms
@@ -1154,7 +1155,7 @@ Stage 6
 def box_iou_xyxy (a, b):
     #a: (N, 4), b (N, 4) pair IoU in xyxy
     #return IoU (N, )
-    
+
     x1 = torch.max (a [:, 0], b [:, 0])
     y1 = torch.max (a [:, 1], b [:, 1])
     x2 = torch.min (a [:, 2], b [:, 2])
@@ -1172,7 +1173,7 @@ def iou_loss (predict_xyxy, target_xyxy):
 
 def _make_level_grids (image_size, strides, device):
     levels = []
-    
+
     for s in strides:
         H = image_size // s
         W = image_size // s
@@ -1181,7 +1182,7 @@ def _make_level_grids (image_size, strides, device):
         yy, xx = torch.meshgrid (ys, xs, indexing = "ij")
         cx = (xx + 0.5) * s
         cy = (yy + 0.5) * s
-        
+
         levels.append ({
             "H": H, "W": W, "stride": s,
             "cx": cx.reshape (-1),
@@ -1201,34 +1202,34 @@ def build_targets_center_prior (targets, num_classes: int, image_size: int, stri
     B = len (targets ["image_id"])
     if device is None:
         device = targets ["boxes"].device if torch.is_tensor (targets ["boxes"]) else torch.device ("cpu")
-        
+
     levels = _make_level_grids (image_size, strides, device)
     per_image = []
-    
+
     M = targets ["boxes"].shape [0]
     bidx = targets ["batch_index"].to (device) if torch.is_tensor (targets ["batch_index"]) else torch.tensor ([], dtype = torch.long, device = device)
     boxes_all = targets ["boxes"].to (device).float () if M else torch.zeros ((0, 4), device = device)
     labels_all = targets ["labels"].to (device).long () if M else torch.zeros ((0,), dtype = torch.long, device = device)
-    
+
     for i in range (B):
         sel = (bidx == i)
         gt = boxes_all [sel]
         gc = labels_all [sel]
         Gi = gt.shape [0]
-        
+
         centers_x = torch.cat ([L ["cx"] for L in levels], dim = 0)
         centers_y = torch.cat ([L ["cy"] for L in levels], dim = 0)
         N = centers_x.numel ()
-        
+
         position_mask = torch.zeros (N, dtype = torch.bool, device = device)
         t_box_letterbox = torch.zeros (N, 4, device = device)
         t_cls = torch.zeros (N, num_classes, device = device)
         matched_gt_index = torch.full ((N,), -1, dtype = torch.long, device = device)
-        
+
         if Gi == 0:
             per_image.append ((t_cls, t_box_letterbox, position_mask, matched_gt_index))
             continue
-        
+
         start = 0
         for L in levels:
             radius = center_radius * L ["stride"]
@@ -1236,54 +1237,54 @@ def build_targets_center_prior (targets, num_classes: int, image_size: int, stri
             #(HW, )
             cx = L ["cx"]
             cy = L ["cy"]
-            
+
             gx1 = (gt [:, 0]- radius).clamp_ (0, image_size)
             gy1 = (gt [:, 1]- radius).clamp_ (0, image_size)
             gx2 = (gt [:, 2]+ radius).clamp_ (0, image_size)
             gy2 = (gt [:, 3]+ radius).clamp_ (0, image_size)
-                                              
+
             in_x = (cx.unsqueeze (0) >= gx1.unsqueeze (1)) & (cx.unsqueeze (0) <= gx2.unsqueeze (1))
             in_y = (cy.unsqueeze (0) >= gy1.unsqueeze (1)) & (cy.unsqueeze (0) <= gy2.unsqueeze (1))
             inside = in_x & in_y
-            
+
             if inside.any ():
                 gcx = (gt [:, 0] + gt [:, 2]) / 2
                 gcy = (gt [:, 1] + gt [:, 3]) / 2
                 dx = torch.abs (cx.unsqueeze (0) - gcx.unsqueeze (1))
                 dy = torch.abs (cy.unsqueeze (0) - gcy.unsqueeze (1))
                 distance = dx + dy
-                
+
                 distance_masked = torch.where (inside, distance, torch.full_like (distance, 1e9))
                 k = min (topk, HW)
                 _, indexs = torch.topk (-distance_masked, k = k, dim = 1)
                 flat_index = indexs + start
                 position_mask [flat_index.reshape (-1)] = True
-                
+
                 matched_gt_index [flat_index.reshape (-1)] = torch.arange (Gi, device = device).unsqueeze (1).expand (-1, k).reshape (-1)
-                
+
             start += HW
-            
+
         pos_index = torch.nonzero (position_mask, as_tuple = False).flatten ()
-        
+
         if pos_index.numel ():
             mg: torch.Tensor = matched_gt_index [pos_index]
             gt_sel = gt [mg]
-            
+
             centers_x_all = torch.cat ([L ["cx"] for L in levels], dim = 0)
             centers_y_all = torch.cat ([L ["cy"] for L in levels], dim = 0)
             cxp = centers_x_all [pos_index]
             cyp = centers_y_all [pos_index]
-            
+
             l = (cxp - gt_sel [:, 0]).clamp_min (0)
             t = (cyp - gt_sel [:, 1]).clamp_min (0)
             r = (gt_sel [:, 2] - cxp).clamp_min (0)
             b = (gt_sel [:, 3] - cyp).clamp_min (0)
             t_box_letterbox [pos_index] = torch.stack ([l, t, r, b], dim = 1)
-            
+
             t_cls [pos_index, gc [mg]] = 1.0
-            
+
         per_image.append ((t_cls, t_box_letterbox, position_mask, matched_gt_index))
-        
+
     return per_image, levels
 
 #loss writing
@@ -1296,38 +1297,38 @@ class DetectionLoss (nn.Module):
         self.strides = strides
         self.lambda_box = lambda_box
         self.lambda_cls = lambda_cls
-        
+
     def forward (self, model_out, targets):
         #out: {"cls": [L], "box"...}
         #cls [l] = (B,C,H,W) logits
         #box [l] = (B,4,H,W) LTRB dist >= 0
         #targets: dict from collate_fn
-        
+
         B = model_out ["cls"][0].shape[0]
         device = model_out ["cls"][0].device
 
         scores_list, boxes_list = flatten_head_outputs (model_out ["cls"], model_out ["box"], self.strides, self.image_size)
 
         per_image_targets, _ = build_targets_center_prior (targets, num_classes = self.num_classes, image_size = self.image_size, strides = self.strides, device = device)
-        
+
         total_cls = torch.tensor (0.0, device = device)
         total_box = torch.tensor (0.0, device = device)
         total_pos = 0
-        
+
         for i in range (B):
             logits = scores_list [i]
             predict_ltrb = None
             predict_xyxy = boxes_list [i]
-            
+
             t_cls, t_ltrb, pos_mask, matched_index = per_image_targets [i]
             N = logits.shape [0]
-            
+
             cls_loss = F.binary_cross_entropy_with_logits (logits, t_cls, reduction = "none") / max (N, 1)
             total_cls += cls_loss.sum ()
-            
+
             if pos_mask.any ():
                 predict_xy = predict_xyxy [pos_mask]
-                
+
                 levels = _make_level_grids (self.image_size, self.strides, device)
                 centers_x_all = torch.cat ([L ["cx"] for L in levels], dim = 0)
                 centers_y_all = torch.cat ([L ["cy"] for L in levels], dim = 0)
@@ -1337,13 +1338,13 @@ class DetectionLoss (nn.Module):
                 ltrb = t_ltrb [pos_mask]
                 l, t, r, b = ltrb.unbind (-1)
                 target_xy = torch.stack ([cxp - l, cyp - t, cxp + r, cyp + b], dim = -1)
-                
+
                 box_loss = iou_loss (predict_xy, target_xy).mean ()
                 total_box += box_loss
                 total_pos += ltrb.shape [0]
-                
+
         total = self.lambda_cls * total_cls + self.lambda_box * total_box
-        
+
         stats = {
             "loss": float (total.detach ().item ()),
             "loss_cls": float (total_cls.detach ().item ()),
@@ -1362,7 +1363,7 @@ def build_optimizer (model, cfg):
         optimizer = torch.optim.AdamW (model.parameters (), lr = cfg ["lr"], weight_decay = cfg ["weight_decay"])
     else:
         optimizer = torch.optim.SGD (model.parameters (), lr = cfg ["lr"], momentum = 0.9, weight_decay = cfg ["weight_decay"], nesterov = True)
-        
+
     if cfg.get ("cosine_schedule", True):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR (optimizer, T_max = cfg ["epochs"])
     else:
@@ -1392,10 +1393,10 @@ def train_step (model, batch, device):
         outputs = model (images)
         loss, stats = criterion (outputs, targets)
     scaler.scale (loss).backward ()
-    
-    if CFG.get ("grid_clip_norm", None):
+
+    if CFG.get ("grad_clip_norm", None):
         scaler.unscale_ (optimizer)
-        torch.nn.utils.clip_grad_norm_ (model.parameters (), CFG ["grid_clip_norm"])
+        torch.nn.utils.clip_grad_norm_ (model.parameters (), CFG ["grad_clip_norm"])
     scaler.step (optimizer)
     scaler.update ()
     return stats
@@ -1419,13 +1420,572 @@ history = deque (maxlen = 50)
 
 for epoch in range (3):
     t0 = time.time ()
-    
+
     for it, batch in enumerate (tiny_loader):
         stats = train_step (model, batch, device)
+        ema.update (model)
         history.append (stats ["loss"])
-        
+
         if (it + 1) % 10 == 0:
             print (f"epoch {epoch+1} iter {it+1}, loss = {stats ['loss']:.4f}, box = {stats ['loss_box']:.4f}, cls = {stats ['loss_cls']:.4f}, pos = {stats ['num_pos']}, time = {time.time () - t0:.2f}s")
-    
+
     scheduler.step ()
     print (f"epoch {epoch+1} done, avg loss = {sum (history) / len (history):.4f}, time = {time.time () - t0:.2f}s")
+
+Stage 7
+
+
+#ema
+import copy
+
+class ModelEMA:
+    def __init__ (self, model, decay = 0.9998, device = None):
+        self.module = copy.deepcopy (model).eval ()
+        for p in self.module.parameters ():
+            p.requires_grad_ (False)
+        self.decay = decay
+        if device:
+            self.module.to (device)
+
+    @torch.no_grad ()
+    def update (self, model):
+        msd = model.state_dict ()
+        esd = self.module.state_dict ()
+        d = self.decay
+        for k in esd.keys ():
+            esd [k].mul_ (d).add_ (msd [k].detach (), alpha = 1.0 - d)
+
+ema = ModelEMA (model, decay = CFG ["ema_decay"], device = device)
+print ("EMA ready with decay", CFG ["ema_decay"])
+
+#loader builders
+
+def build_loader (image_dir, label_dir, cfg, shuffle):
+    ds = YoloDataset (
+        image_dir, label_dir,
+        imgsz = cfg ["imgsz"],
+        augment = shuffle,
+        pad_value = cfg ["letterbox_pad"],
+        hotizontal_flip_prob = (cfg ["hflip_prob"] if shuffle else 0.0),
+        hsv_hgain = cfg.get ("hsv_h", 0.0),
+        hsv_sgain = cfg.get ("hsv_s", 0.0),
+        hsv_vgain = cfg.get ("hsv_v", 0.0),
+    )
+
+    dl = DataLoader (
+        ds, batch_size = cfg ["batch_size"], shuffle = shuffle, num_workers = 4,
+        collate_fn = collate_fn, pin_memory = torch.cuda.is_avaiable (),
+        persistent_workers = torch.Generator ().manual_seed (cfg ["seed"]),
+    )
+    return ds, dl
+
+VAL_IMG_DIR = os.path.join (CFG ["data_root"], CFG ["val_img_dir"])
+VAL_LBL_DIR = os.path.join (CFG ["data_root"], CFG ["val_lbl_dir"])
+val_ds, val_loader = build_loader (VAL_IMG_DIR, VAL_LBL_DIR, CFG, shuffle = False)
+print ("val size:", len (val_ds))
+
+#coco mAP eval
+from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
+
+def undo_letterbox_to_original (xyxy, pad, scale, original_size):
+    px, py = pad
+    x1 = (xyxy [..., 0] - px) / scale
+    y1 = (xyxy [..., 1] - py) / scale
+    x2 = (xyxy [..., 2] - px) / scale
+    y2 = (xyxy [..., 3] - py) / scale
+    H, W = original_size
+    x1.clamp_ (0, W - 1)
+    x2.clamp_ (0, W - 1)
+    y1.clamp_ (0, H - 1)
+    y2.clamp_ (0, H - 1)
+    return torch.stack ([x1, y1, x2, y2], dim = 1)
+
+def _image_size_from_stem (stem):
+    #try common image extensions
+
+    for e in (".jpg", ".jpeg", ".png", ".bmp", ".tiff"):
+        p = os.path.join (VAL_IMG_DIR, stem + e)
+
+        if os.path.exists (p):
+            im = val_ds._read_image (p)
+            return im.shape [:2]
+    raise FileNotFoundError (f"no image for {stem}")
+
+@torch.no_grad ()
+def evaluate_map_coco (model, val_loader, device, imgsz = 640, score_thresh = 0.001):
+    categories = [{"id": i, "name": n} for i, n in enumerate (COCO_NAMES)]
+    coco_gt = {"images" : [], "annotations": [], "categories": categories}
+    ann_id = 1
+
+    for idx, stem in enumerate (val_loader.dataset.stems):
+        H, W = _image_size_from_stem (stem)
+        coco_gt ["images"].append ({"id": idx, "height": H, "width": W, "file_name": stem})
+        lp = os.path.join (VAL_LBL_DIR, stem + ".txt")
+
+        if os.path.exists (lp):
+            arr = val_loader.dataset._read_label (lp)
+            if arr.size:
+                boxes, cls = yolo_to_xyxy (arr, W, H)
+                for j , (x1, y1, x2, y2) in enumerate (boxes):
+                    coco_gt ["annotations"].append ({
+                        "id": ann_id,
+                        "image_id": idx,
+                        "category_id": int (cls [j]),
+                        "bbox": [float (x1), float (y1), float (x2 - x1), float (y2 - y1)],
+                        "area": float (max (0.0, (x2 - x1)) * max (0.0, (y2 - y1))),
+                        "iscrowd": 0,
+                    })
+                    ann_id += 1
+
+    cocoGt = COCO ()
+    cocoGt.dataset = coco_gt
+    cocoGt.createIndex ()
+
+    #model inference
+    dets_json = []
+    model.eval ()
+    for images, targets in val_loader:
+        images = images.to (device, non_blocking = True)
+        outs = model_inference_step (model, images, image_size = imgsz, score_thresh = score_thresh, iou_thresh = 0.7, max_det = 300)
+
+        for b, det in enumerate (outs):
+            stem = targets ["image_id"]
+            image_index = val_loader.dataset.stems.index (stem)
+            H, W = targets ["original_size"] [b]
+            scale = targets ["scale"][b]
+            pad = targets ["pad"][b]
+            if det ["boxes"].numel () == 0:
+                continue
+            bx_original = undo_letterbox_to_original (det ["boxes"].clone (), pad, scale, (H, W))
+            sc = det ["scores"].tolist ()
+            cl = det ["classes"].tolist ()
+
+            for k in range (bx_original.shape [0]):
+                x1, y1, x2, y2 = bx_original [k].tolist ()
+                dets_json.append ({
+                    "image_id": image_index,
+                    "category_id": int (cl [k]),
+                    "bbox": [x1, y1, x2 - x1, y2 - y1],
+                    "score": float (sc [k]),
+                })
+
+    if len (dets_json):
+        cocoDt = cocoGt.loadRes (dets_json)
+    else:
+        cocoDt = cocoGt.loadRes ([])
+    cocoEval = COCOeval (cocoGt, cocoDt, iouType = "bbox")
+    cocoEval.params.useCats
+    cocoEval.evaluate ()
+    cocoEval.accumulate ()
+    cocoEval.summarize ()
+    return float (cocoEval.stats [0]) if cocoEval.stats is not None else 0.0
+
+#one epoch, chunked training driver
+
+def one_epoch (model, loader, device, log_every = 50):
+    model.train ()
+    metres = {"loss": 0.0, "loss_box": 0.0, "loss_cls": 0.0, "num_pos": 0, "n": 0}
+
+    for it, batch in enumerate (loader):
+        stats = train_step (model, batch, device)
+        ema.update (model)
+        for k in ("loss", "loss_box", "loss_cls", "num_pos"):
+            metres [k] += stats [k]
+        metres ["n"] += 1
+        if it % log_every == 0:
+            n = metres ["n"]
+            print (f"it {it + 1 :> 4}, loss {metres ['loss'] / n:.4f}, loss_box {metres ['loss_box'] / n:.4f}, loss_cls {metres ['loss_cls'] / n:.4f}, num_pos {metres ['num_pos'] / n:.1f}")
+    n = max (1, metres ["n"])
+    return {k: (metres [k] / n) for k in metres if k != "n"}
+
+best_map = 0.0
+os.makedirs (DIRS ["checkpoints"], exist_ok = True)
+
+for epoch in range (CFG ["epochs"]):
+    print (f"Epoch {epoch + 1}/{CFG ['epochs']}")
+    if _count_images (TRAIN_IMG_DIR) == 0:
+        stage_train_chunk ()
+
+    train_ds, train_loader = build_loader (TRAIN_IMG_DIR, TRAIN_LBL_DIR, CFG, shuffle = True)
+    if epoch < CFG ["warmup_epochs"]:
+        for g in optimizer.param_groups:
+            g ["lr"] = CFG ["lr"] * (epoch + 1) / max (1, CFG ["warmup_epochs"])
+
+    stats = one_epoch (model, train_loader, device)
+    scheduler.step ()
+
+    dispose_current_chunk (delete_from_cache = True, mask_seen = True)
+
+    model.eval ()
+    map5095 = evaluate_map_coco (ema.module, val_loader, device, imgsz = CFG ["imgsz"])
+    print (f"[EVAL] mAP50-95: {map5095:.4f}, best {best_map:.4f}")
+
+    checkpoint_path = os.path.join(DIRS["checkpoints"], f"{RUN_NAME}_e{epoch+1:03d}.pt")
+    torch.save ({
+        "model": model.state_dict (),
+        "ema": ema.module.state_dict (),
+        "optimizer": optimizer.state_dict (),
+        "scheduler": scheduler.state_dict (),
+        "CFG": CFG,
+    }, checkpoint_path)
+
+    if map5095 > best_map:
+        best_map = map5095
+        best_path = os.path.join(DIRS["checkpoints"], f"{RUN_NAME}_best.pt")
+        torch.save ({
+            "model": model.state_dict (),
+            "ema": ema.module.state_dict (),
+            "optimizer": optimizer.state_dict (),
+            "scheduler": scheduler.state_dict (),
+            "CFG": CFG,
+        }, best_path)
+        print (f"  saved best to {best_path}")
+
+# === cell7_train_with_viz: EMA + loaders + realtime viz + training + eval ===
+import os, copy, glob, math, json
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+from IPython.display import display, clear_output
+
+# ---------- 0) Small config toggles ----------
+VIZ_EVERY = int(CFG.get("viz_every", 200))   # inline viz frequency (steps). Set 0 to disable
+VIZ_MAX_IMAGES = int(CFG.get("viz_max_images", 4))
+SAVE_EVERY_EPOCH = True                      # always save per-epoch ckpt
+EVAL_EVERY_EPOCH = True                      # run mAP eval each epoch (skips if pycocotools missing)
+
+# ---------- 1) EMA ----------
+class ModelEMA:
+    def __init__(self, model, decay=0.9998, device=None):
+        self.module = copy.deepcopy(model).eval()
+        for p in self.module.parameters():
+            p.requires_grad_(False)
+        self.decay = decay
+        if device:
+            self.module.to(device)
+
+    @torch.no_grad()
+    def update(self, model):
+        msd = model.state_dict()
+        esd = self.module.state_dict()
+        d = self.decay
+        for k in esd.keys():
+            esd[k].mul_(d).add_(msd[k].detach(), alpha=1.0 - d)
+
+# instantiate EMA
+ema = ModelEMA(model, decay=CFG.get("ema_decay", 0.9998), device=device)
+
+# ---------- 2) Dataloader builders (uses your YoloDataset, collate_fn, _wif) ----------
+def build_loader(img_dir, lbl_dir, cfg, shuffle):
+    ds = YoloDataset(
+        img_dir, lbl_dir,
+        imgsz=cfg["imgsz"], augment=shuffle,
+        pad_value=cfg["letterbox_pad"],
+        horizontal_flip_prob=(cfg.get("hflip_p", 0.5) if shuffle else 0.0),
+        hsv_hgain=cfg.get("hsv_h", 0.0),
+        hsv_sgain=cfg.get("hsv_s", 0.0),
+        hsv_vgain=cfg.get("hsv_v", 0.0),
+    )
+    dl = DataLoader(
+        ds, batch_size=cfg["batch_size"], shuffle=shuffle, num_workers=4,
+        collate_fn=collate_fn, pin_memory=torch.cuda.is_available(),
+        persistent_workers=False, worker_init_fn=_wif,
+        generator=torch.Generator().manual_seed(cfg["seed"]),
+    )
+    return ds, dl
+
+VAL_IMG_DIR = os.path.join(CFG["data_root"], CFG["val_img_dir"])
+VAL_LBL_DIR = os.path.join(CFG["data_root"], CFG["val_lbl_dir"])
+val_ds, val_loader = build_loader(VAL_IMG_DIR, VAL_LBL_DIR, CFG, shuffle=False)
+
+# ---------- 3) Letterbox undo + small helpers ----------
+def undo_letterbox_to_orig(xyxy, pad, scale, orig_size):
+    # xyxy in letterbox space -> original image coords
+    px, py = pad
+    x1 = (xyxy[:,0] - px) / scale
+    y1 = (xyxy[:,1] - py) / scale
+    x2 = (xyxy[:,2] - px) / scale
+    y2 = (xyxy[:,3] - py) / scale
+    H, W = orig_size
+    x1.clamp_(0, W-1); x2.clamp_(0, W-1)
+    y1.clamp_(0, H-1); y2.clamp_(0, H-1)
+    return torch.stack([x1,y1,x2,y2], dim=1)
+
+def _find_img_path(stem, img_dir):
+    for e in (".jpg",".jpeg",".png",".bmp",".JPG",".JPEG",".PNG",".BMP"):
+        p = os.path.join(img_dir, stem + e)
+        if os.path.exists(p):
+            return p
+    return None
+
+def _draw_boxes(ax, boxes, labels=None, scores=None, title=None):
+    ax.set_axis_off()
+    if title: ax.set_title(title, fontsize=10)
+    for i,(x1,y1,x2,y2) in enumerate(boxes):
+        rect = Rectangle((x1,y1), x2-x1, y2-y1, fill=False, linewidth=1.5)
+        ax.add_patch(rect)
+        tag = None
+        if labels is not None:
+            cid = int(labels[i])
+            if 0 <= cid < len(COCO_NAMES):
+                tag = COCO_NAMES[cid]
+            else:
+                tag = str(cid)
+        if scores is not None:
+            s = f"{scores[i]:.2f}"
+            tag = f"{tag} {s}" if tag else s
+        if tag:
+            ax.text(x1, max(0, y1-2), tag, fontsize=7,
+                    bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
+
+# ---------- 4) Live inline visualization (Pred LEFT vs GT RIGHT on ORIGINAL image) ----------
+def show_pred_vs_gt_inline(model, batch, dataset, img_dir, lbl_dir, max_images=4):
+    model.eval()
+    images, targets = batch
+    dev = next(model.parameters()).device
+    images_dev = images.to(dev, non_blocking=True)
+
+    outs = model_inference_step(model, images_dev, image_size=CFG["imgsz"],
+                                score_thresh=0.001, iou_thresh=0.7, max_det=200)
+
+    B = images.shape[0]
+    nshow = min(B, max_images)
+
+    fig_w = 10
+    fig_h = max(6, nshow * 3)
+    fig, axes = plt.subplots(nshow, 2, figsize=(fig_w, fig_h), squeeze=False)
+
+    for i in range(nshow):
+        stem = targets["image_id"][i]
+        H, W = targets["orig_size"][i]
+        scale = targets["scale"][i]
+        pad = targets["pad"][i]
+
+        # load original image
+        p = _find_img_path(stem, img_dir)
+        if p is None:
+            # fallback to letterboxed tensor
+            img_disp = (images[i].detach().cpu().float().clamp(0,1).permute(1,2,0).numpy()*255).astype(np.uint8)
+        else:
+            img_disp = dataset._read_image(p)
+
+        # preds -> original coords
+        if outs[i]["boxes"].numel() > 0:
+            pred_boxes_orig = undo_letterbox_to_orig(outs[i]["boxes"].detach().cpu(), pad, scale, (H, W)).numpy()
+            pred_scores = outs[i]["scores"].detach().cpu().numpy().tolist()
+            pred_classes = outs[i]["classes"].detach().cpu().numpy().tolist()
+        else:
+            pred_boxes_orig = np.zeros((0,4), dtype=np.float32)
+            pred_scores, pred_classes = [], []
+
+        # gt from txt
+        gt_boxes_orig = np.zeros((0,4), dtype=np.float32)
+        gt_classes = []
+        lblp = os.path.join(lbl_dir, stem + ".txt")
+        if os.path.exists(lblp):
+            arr = dataset._read_labels(lblp)
+            if arr.size:
+                bxyxy, cls = yolo_to_xyxy(arr, W, H)
+                gt_boxes_orig = np.array(bxyxy, dtype=np.float32)
+                gt_classes = cls.astype(np.int32).tolist()
+
+        # LEFT: preds
+        axL = axes[i,0]; axL.imshow(img_disp)
+        _draw_boxes(axL, pred_boxes_orig, labels=pred_classes, scores=pred_scores, title=f"{stem} — Pred")
+        # RIGHT: GT
+        axR = axes[i,1]; axR.imshow(img_disp)
+        _draw_boxes(axR, gt_boxes_orig, labels=gt_classes, scores=None, title=f"{stem} — GT")
+
+    plt.tight_layout()
+    clear_output(wait=True)
+    display(fig)
+    plt.close(fig)
+
+# ---------- 5) (Optional) COCO mAP evaluation (skips gracefully if pycocotools missing) ----------
+def evaluate_map_coco_safe(model, val_loader, device):
+    try:
+        from pycocotools.coco import COCO
+        from pycocotools.cocoeval import COCOeval
+    except Exception as e:
+        print("[EVAL] pycocotools not available, skipping mAP eval.")
+        return None
+
+    # build small COCO GT from staged YOLO labels
+    categories = [{"id": i, "name": n} for i, n in enumerate(COCO_NAMES)]
+    coco_gt = {"images": [], "annotations": [], "categories": categories}
+    ann_id = 1
+    for idx, stem in enumerate(val_loader.dataset.stems):
+        # find image H,W
+        im_path = _find_img_path(stem, VAL_IMG_DIR)
+        if im_path is None:
+            continue
+        im = val_loader.dataset._read_image(im_path)
+        H, W = im.shape[:2]
+        coco_gt["images"].append({"id": idx, "file_name": stem, "height": H, "width": W})
+        lp = os.path.join(VAL_LBL_DIR, stem + ".txt")
+        if os.path.exists(lp):
+            arr = val_loader.dataset._read_labels(lp)
+            if arr.size:
+                boxes, cls = yolo_to_xyxy(arr, W, H)
+                for j,(x1,y1,x2,y2) in enumerate(boxes):
+                    coco_gt["annotations"].append({
+                        "id": ann_id, "image_id": idx, "category_id": int(cls[j]),
+                        "bbox": [float(x1), float(y1), float(x2-x1), float(y2-y1)],
+                        "area": float(max(0.0, (x2-x1))*max(0.0, (y2-y1))),
+                        "iscrowd": 0
+                    })
+                    ann_id += 1
+    from pycocotools.coco import COCO
+    from pycocotools.cocoeval import COCOeval
+    cocoGt = COCO()
+    cocoGt.dataset = coco_gt
+    cocoGt.createIndex()
+
+    # detections
+    dets_json = []
+    model.eval()
+    for images, targets in val_loader:
+        images = images.to(device, non_blocking=True)
+        outs = model_inference_step(model, images, image_size=CFG["imgsz"],
+                                    score_thresh=0.001, iou_thresh=0.7, max_det=300)
+        for b, det in enumerate(outs):
+            stem = targets["image_id"][b]
+            try:
+                img_idx = val_loader.dataset.stems.index(stem)
+            except:
+                continue
+            H, W = targets["orig_size"][b]
+            scale = targets["scale"][b]; pad = targets["pad"][b]
+            if det["boxes"].numel() == 0:
+                continue
+            bx = undo_letterbox_to_orig(det["boxes"].detach().cpu(), pad, scale, (H, W)).numpy()
+            sc = det["scores"].detach().cpu().numpy().tolist()
+            cl = det["classes"].detach().cpu().numpy().tolist()
+            for k in range(bx.shape[0]):
+                x1,y1,x2,y2 = bx[k].tolist()
+                dets_json.append({
+                    "image_id": img_idx,
+                    "category_id": int(cl[k]),
+                    "bbox": [x1, y1, x2-x1, y2-y1],
+                    "score": float(sc[k]),
+                })
+
+    cocoDt = cocoGt.loadRes(dets_json) if len(dets_json) else cocoGt.loadRes([])
+    cocoEval = COCOeval(cocoGt, cocoDt, iouType="bbox")
+    cocoEval.params.useCats = 1
+    cocoEval.evaluate(); cocoEval.accumulate(); cocoEval.summarize()
+    return float(cocoEval.stats[0]) if cocoEval.stats is not None else None
+
+# ---------- 6) Training helpers ----------
+global_step = 0
+
+def one_epoch(model, loader, device, log_every=50):
+    global global_step
+    model.train()
+    meters = {"loss":0.0, "loss_box":0.0, "loss_cls":0.0, "num_pos":0, "n":0}
+
+    steps = len(loader)
+    warmup_epochs = int(CFG.get("warmup_epochs", 0))
+    # epoch-level warmup (simple): handled outside in main loop via LR set
+    for it, batch in enumerate(loader):
+        stats = train_step(model, batch, device)
+        ema.update(model)
+        global_step += 1
+
+        # inline viz
+        if VIZ_EVERY and ((it + 1) % VIZ_EVERY == 0):
+            # show predictions vs GT from the *current batch*
+            show_pred_vs_gt_inline(ema.module, (batch[0].cpu(), batch[1]), loader.dataset,
+                                   TRAIN_IMG_DIR, TRAIN_LBL_DIR, max_images=VIZ_MAX_IMAGES)
+
+        for k in ("loss","loss_box","loss_cls","num_pos"):
+            meters[k] += stats[k]
+        meters["n"] += 1
+        if (it+1) % log_every == 0:
+            n = meters["n"]
+            print(f'   it {it+1:>4}/{steps} | loss {meters["loss"]/n:.4f}  '
+                  f'box {meters["loss_box"]/n:.4f}  cls {meters["loss_cls"]/n:.4f}  '
+                  f'pos {meters["num_pos"]/n:.1f}')
+
+    n = max(1, meters["n"])
+    return {k:(meters[k]/n) for k in meters if k!="n"}
+
+# ---------- 7) Main training loop (chunk → train → dispose → eval → save) ----------
+best_map = -1.0
+os.makedirs(DIRS["checkpoints"], exist_ok=True)
+
+for epoch in range(CFG["epochs"]):
+    print(f"\n=== EPOCH {epoch+1}/{CFG['epochs']} ===")
+
+    # Ensure a train chunk is staged
+    if _count_imgs(TRAIN_IMG_DIR) == 0:
+        stage_train_chunk()
+
+    # Build train loader fresh each epoch (new chunk)
+    train_ds, train_loader = build_loader(TRAIN_IMG_DIR, TRAIN_LBL_DIR, CFG, shuffle=True)
+
+    # light LR warmup across first few epochs
+    if epoch < CFG.get("warmup_epochs", 0):
+        for g in optimizer.param_groups:
+            g["lr"] = CFG["lr"] * (epoch + 1) / max(1, CFG["warmup_epochs"])
+
+    stats = one_epoch(model, train_loader, device)
+    # step epoch scheduler (if you're using epoch-level Cosine)
+    if 'scheduler' in globals() and scheduler is not None:
+        try:
+            scheduler.step()
+        except Exception as e:
+            pass
+
+    # rotate chunk to keep disk usage low
+    dispose_current_chunk(delete_from_cache=True, mark_seen=True)
+
+    # Evaluate (mAP)
+    map5095 = None
+    if EVAL_EVERY_EPOCH:
+        map5095 = evaluate_map_coco_safe(ema.module, val_loader, device)
+        if map5095 is not None:
+            print(f"[EVAL] mAP50-95: {map5095:.4f}")
+
+    # Save ckpts
+    ckpt_base = os.path.join(DIRS["checkpoints"], f"{RUN_NAME}_e{epoch+1:03d}.pt")
+    if SAVE_EVERY_EPOCH:
+        torch.save({
+            "model": model.state_dict(),
+            "ema": ema.module.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": (scheduler.state_dict() if ('scheduler' in globals() and scheduler is not None) else None),
+            "cfg": CFG
+        }, ckpt_base)
+        print("Saved:", ckpt_base)
+
+    if map5095 is not None and map5095 > best_map:
+        best_map = map5095
+        best_path = os.path.join(DIRS["checkpoints"], f"{RUN_NAME}_best.pt")
+        torch.save({
+            "model": model.state_dict(),
+            "ema": ema.module.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": (scheduler.state_dict() if ('scheduler' in globals() and scheduler is not None) else None),
+            "cfg": CFG
+        }, best_path)
+        print("↑ Saved BEST:", best_path)
+
+print("\nTraining loop finished.")
+
+
+#resume helper
+
+def load_checkpoint (path, model, ema = None, optimizer = None, scheduler = None, device = "cuda"):
+    checkpoint = torch.load (path, map_location = device)
+    model.load_state_dict (checkpoint ["model"])
+    if ema and "ema" in checkpoint:
+        ema.module.load_state_dict (checkpoint ["ema"])
+    if optimizer and "optimizer" in checkpoint:
+        optimizer.load_state_dict (checkpoint ["optimizer"])
+    if scheduler and "scheduler" in checkpoint:
+        scheduler.load_state_dict (checkpoint ["scheduler"])
+    print ("Loaded checkpoint:", path)
