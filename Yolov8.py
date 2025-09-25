@@ -994,11 +994,44 @@ class YoloModel (nn.Module):
         self.head = YoloV8LiteHead (in_ch = fpn_out, num_classes = num_classes, hidden = head_hidden, num_levels  = 3)
         self.strides = [8, 16, 32]
 
-    def forward (self, x):
-        c3, c4, c5 = self.backbone (x)
-        p3, p4, p5 = self.neck (c3, c4, c5)
-        cls_outs, box_outs = self.head ([p3, p4, p5])
-        return {"features": [p3, p4, p5], "cls": cls_outs, "box": box_outs, "strides": self.strides}
+    def forward(self, x, targets=None):
+      c3, c4, c5 = self.backbone(x)
+      p3, p4, p5 = self.neck(c3, c4, c5)
+      cls_outs, box_outs = self.head([p3, p4, p5])
+      head_out = {"features": [p3, p4, p5], "cls": cls_outs, "box": box_outs, "strides": self.strides}
+
+      # Training path: compute & return standardized loss dict
+      if self.training and targets is not None and hasattr(self, "criterion") and self.criterion is not None:
+          losses, stats = self.criterion(head_out, targets)
+          # Normalize shapes of (losses, stats) so train_step can rely on keys.
+
+          # losses can be either a scalar tensor OR a dict; handle both
+          if torch.is_tensor(losses):
+              total_loss = losses
+              # If stats might not contain components, give safe defaults:
+              loss_box = stats.get("loss_box", total_loss.detach()*0)
+              loss_cls = stats.get("loss_cls", total_loss.detach()*0)
+              num_pos  = stats.get("num_pos",  0)
+          elif isinstance(losses, dict):
+              # try common keys
+              total_loss = losses.get("loss") or losses.get("total_loss") or losses.get("overall") or sum([v for v in losses.values() if torch.is_tensor(v)])
+              loss_box   = losses.get("loss_box",  stats.get("loss_box", total_loss.detach()*0))
+              loss_cls   = losses.get("loss_cls",  stats.get("loss_cls", total_loss.detach()*0))
+              num_pos    = losses.get("num_pos",   stats.get("num_pos",  0))
+          else:
+              raise TypeError("criterion must return Tensor or (dict, stats) with a total loss")
+
+          return {
+              "loss": total_loss,
+              "loss_box": loss_box,
+              "loss_cls": loss_cls,
+              "num_pos": float(num_pos),   # keep as float for logging
+              # keep raw head for optional extra logging if you want
+              # "head_out": head_out,
+          }
+
+      # Inference path: return raw predictions
+      return head_out
 
 
 #forward smoke test
@@ -1383,23 +1416,64 @@ criterion = DetectionLoss (
 
 optimizer, scheduler = build_optimizer (model, CFG)
 
-def train_step (model, batch, device):
-    model.train ()
+def train_step(model, batch, device):
+    model.train()
     images, targets = batch
-    images = images.to (device, non_blocking = True)
+    images = images.to(device, non_blocking=True)
 
-    optimizer.zero_grad (set_to_none = True)
-    with autocast (enabled = CFG ["amp"], device_type = "cuda"):
-        outputs = model (images)
-        loss, stats = criterion (outputs, targets)
-    scaler.scale (loss).backward ()
+    optimizer.zero_grad(set_to_none=True)
 
-    if CFG.get ("grad_clip_norm", None):
-        scaler.unscale_ (optimizer)
-        torch.nn.utils.clip_grad_norm_ (model.parameters (), CFG ["grad_clip_norm"])
-    scaler.step (optimizer)
-    scaler.update ()
+    with torch.cuda.amp.autocast(enabled=CFG.get("amp", True)):
+        out = model(images, targets)         # your forward that returns losses
+        loss = out["loss"]                   # keep your keys
+        loss_box = out["loss_box"]
+        loss_cls = out["loss_cls"]
+        num_pos  = out["num_pos"]
+
+    # backward + (optional) clip + step
+    scaler.scale(loss).backward()
+
+    if CFG.get("grad_clip_norm", None):
+        # unscale *once* here
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), CFG["grad_clip_norm"])
+
+    scaler.step(optimizer)   # moves weights
+    scaler.update()
+
+    stats = {
+        "loss": float(loss.detach().item()),
+        "loss_box": float(loss_box.detach().item()),
+        "loss_cls": float(loss_cls.detach().item()),
+        "num_pos": float(num_pos),
+    }
     return stats
+
+#ema
+import copy
+
+class ModelEMA:
+    def __init__ (self, model, decay = 0.9998, device = None):
+        self.module = copy.deepcopy (model).eval ()
+        for p in self.module.parameters ():
+            p.requires_grad_ (False)
+        self.decay = decay
+        if device:
+            self.module.to (device)
+
+    @torch.no_grad ()
+    def update (self, model):
+        msd = model.state_dict ()
+        esd = self.module.state_dict ()
+        d = self.decay
+        for k in esd.keys():
+          if esd[k].dtype.is_floating_point:
+              esd[k].mul_(d).add_(msd[k].detach(), alpha=1.0 - d)
+          else:
+              esd[k].copy_(msd[k])
+
+ema = ModelEMA (model, decay = CFG ["ema_decay"], device = device)
+print ("EMA ready with decay", CFG ["ema_decay"])
 
 #overfit a tiny subset to check learning
 
@@ -1415,7 +1489,6 @@ tiny_loader = DataLoader (
 
 print (f"[SANITY] Overfitting tiny subset: {len (tiny_subset)} iamges")
 
-ema = None
 history = deque (maxlen = 50)
 
 for epoch in range (3):
@@ -1435,29 +1508,6 @@ for epoch in range (3):
 Stage 7
 
 
-#ema
-import copy
-
-class ModelEMA:
-    def __init__ (self, model, decay = 0.9998, device = None):
-        self.module = copy.deepcopy (model).eval ()
-        for p in self.module.parameters ():
-            p.requires_grad_ (False)
-        self.decay = decay
-        if device:
-            self.module.to (device)
-
-    @torch.no_grad ()
-    def update (self, model):
-        msd = model.state_dict ()
-        esd = self.module.state_dict ()
-        d = self.decay
-        for k in esd.keys ():
-            esd [k].mul_ (d).add_ (msd [k].detach (), alpha = 1.0 - d)
-
-ema = ModelEMA (model, decay = CFG ["ema_decay"], device = device)
-print ("EMA ready with decay", CFG ["ema_decay"])
-
 #loader builders
 
 def build_loader (image_dir, label_dir, cfg, shuffle):
@@ -1466,7 +1516,7 @@ def build_loader (image_dir, label_dir, cfg, shuffle):
         imgsz = cfg ["imgsz"],
         augment = shuffle,
         pad_value = cfg ["letterbox_pad"],
-        hotizontal_flip_prob = (cfg ["hflip_prob"] if shuffle else 0.0),
+        horizontal_flip_prob = (cfg ["hflip_p"] if shuffle else 0.0),
         hsv_hgain = cfg.get ("hsv_h", 0.0),
         hsv_sgain = cfg.get ("hsv_s", 0.0),
         hsv_vgain = cfg.get ("hsv_v", 0.0),
@@ -1474,7 +1524,7 @@ def build_loader (image_dir, label_dir, cfg, shuffle):
 
     dl = DataLoader (
         ds, batch_size = cfg ["batch_size"], shuffle = shuffle, num_workers = 4,
-        collate_fn = collate_fn, pin_memory = torch.cuda.is_avaiable (),
+        collate_fn = collate_fn, pin_memory = torch.cuda.is_available (),
         persistent_workers = torch.Generator ().manual_seed (cfg ["seed"]),
     )
     return ds, dl
@@ -1581,66 +1631,18 @@ def evaluate_map_coco (model, val_loader, device, imgsz = 640, score_thresh = 0.
     cocoEval.summarize ()
     return float (cocoEval.stats [0]) if cocoEval.stats is not None else 0.0
 
-#one epoch, chunked training driver
+#resume helper
 
-def one_epoch (model, loader, device, log_every = 50):
-    model.train ()
-    metres = {"loss": 0.0, "loss_box": 0.0, "loss_cls": 0.0, "num_pos": 0, "n": 0}
-
-    for it, batch in enumerate (loader):
-        stats = train_step (model, batch, device)
-        ema.update (model)
-        for k in ("loss", "loss_box", "loss_cls", "num_pos"):
-            metres [k] += stats [k]
-        metres ["n"] += 1
-        if it % log_every == 0:
-            n = metres ["n"]
-            print (f"it {it + 1 :> 4}, loss {metres ['loss'] / n:.4f}, loss_box {metres ['loss_box'] / n:.4f}, loss_cls {metres ['loss_cls'] / n:.4f}, num_pos {metres ['num_pos'] / n:.1f}")
-    n = max (1, metres ["n"])
-    return {k: (metres [k] / n) for k in metres if k != "n"}
-
-best_map = 0.0
-os.makedirs (DIRS ["checkpoints"], exist_ok = True)
-
-for epoch in range (CFG ["epochs"]):
-    print (f"Epoch {epoch + 1}/{CFG ['epochs']}")
-    if _count_images (TRAIN_IMG_DIR) == 0:
-        stage_train_chunk ()
-
-    train_ds, train_loader = build_loader (TRAIN_IMG_DIR, TRAIN_LBL_DIR, CFG, shuffle = True)
-    if epoch < CFG ["warmup_epochs"]:
-        for g in optimizer.param_groups:
-            g ["lr"] = CFG ["lr"] * (epoch + 1) / max (1, CFG ["warmup_epochs"])
-
-    stats = one_epoch (model, train_loader, device)
-    scheduler.step ()
-
-    dispose_current_chunk (delete_from_cache = True, mask_seen = True)
-
-    model.eval ()
-    map5095 = evaluate_map_coco (ema.module, val_loader, device, imgsz = CFG ["imgsz"])
-    print (f"[EVAL] mAP50-95: {map5095:.4f}, best {best_map:.4f}")
-
-    checkpoint_path = os.path.join(DIRS["checkpoints"], f"{RUN_NAME}_e{epoch+1:03d}.pt")
-    torch.save ({
-        "model": model.state_dict (),
-        "ema": ema.module.state_dict (),
-        "optimizer": optimizer.state_dict (),
-        "scheduler": scheduler.state_dict (),
-        "CFG": CFG,
-    }, checkpoint_path)
-
-    if map5095 > best_map:
-        best_map = map5095
-        best_path = os.path.join(DIRS["checkpoints"], f"{RUN_NAME}_best.pt")
-        torch.save ({
-            "model": model.state_dict (),
-            "ema": ema.module.state_dict (),
-            "optimizer": optimizer.state_dict (),
-            "scheduler": scheduler.state_dict (),
-            "CFG": CFG,
-        }, best_path)
-        print (f"  saved best to {best_path}")
+def load_checkpoint (path, model, ema = None, optimizer = None, scheduler = None, device = "cuda"):
+    checkpoint = torch.load (path, map_location = device)
+    model.load_state_dict (checkpoint ["model"])
+    if ema and "ema" in checkpoint:
+        ema.module.load_state_dict (checkpoint ["ema"])
+    if optimizer and "optimizer" in checkpoint:
+        optimizer.load_state_dict (checkpoint ["optimizer"])
+    if scheduler and "scheduler" in checkpoint:
+        scheduler.load_state_dict (checkpoint ["scheduler"])
+    print ("Loaded checkpoint:", path)
 
 # === cell7_train_with_viz: EMA + loaders + realtime viz + training + eval ===
 import os, copy, glob, math, json
@@ -1651,7 +1653,6 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from IPython.display import display, clear_output
 
-# ---------- 0) Small config toggles ----------
 VIZ_EVERY = int(CFG.get("viz_every", 200))   # inline viz frequency (steps). Set 0 to disable
 VIZ_MAX_IMAGES = int(CFG.get("viz_max_images", 4))
 SAVE_EVERY_EPOCH = True                      # always save per-epoch ckpt
@@ -1673,7 +1674,10 @@ class ModelEMA:
         esd = self.module.state_dict()
         d = self.decay
         for k in esd.keys():
-            esd[k].mul_(d).add_(msd[k].detach(), alpha=1.0 - d)
+          if esd[k].dtype.is_floating_point:
+              esd[k].mul_(d).add_(msd[k].detach(), alpha=1.0 - d)
+          else:
+              esd[k].copy_(msd[k])
 
 # instantiate EMA
 ema = ModelEMA(model, decay=CFG.get("ema_decay", 0.9998), device=device)
@@ -1813,12 +1817,10 @@ def evaluate_map_coco_safe(model, val_loader, device):
         print("[EVAL] pycocotools not available, skipping mAP eval.")
         return None
 
-    # build small COCO GT from staged YOLO labels
     categories = [{"id": i, "name": n} for i, n in enumerate(COCO_NAMES)]
     coco_gt = {"images": [], "annotations": [], "categories": categories}
     ann_id = 1
     for idx, stem in enumerate(val_loader.dataset.stems):
-        # find image H,W
         im_path = _find_img_path(stem, VAL_IMG_DIR)
         if im_path is None:
             continue
@@ -1844,7 +1846,6 @@ def evaluate_map_coco_safe(model, val_loader, device):
     cocoGt.dataset = coco_gt
     cocoGt.createIndex()
 
-    # detections
     dets_json = []
     model.eval()
     for images, targets in val_loader:
@@ -1879,7 +1880,6 @@ def evaluate_map_coco_safe(model, val_loader, device):
     cocoEval.evaluate(); cocoEval.accumulate(); cocoEval.summarize()
     return float(cocoEval.stats[0]) if cocoEval.stats is not None else None
 
-# ---------- 6) Training helpers ----------
 global_step = 0
 
 def one_epoch(model, loader, device, log_every=50):
@@ -1889,7 +1889,6 @@ def one_epoch(model, loader, device, log_every=50):
 
     steps = len(loader)
     warmup_epochs = int(CFG.get("warmup_epochs", 0))
-    # epoch-level warmup (simple): handled outside in main loop via LR set
     for it, batch in enumerate(loader):
         stats = train_step(model, batch, device)
         ema.update(model)
@@ -1975,17 +1974,3 @@ for epoch in range(CFG["epochs"]):
         print("↑ Saved BEST:", best_path)
 
 print("\nTraining loop finished.")
-
-
-#resume helper
-
-def load_checkpoint (path, model, ema = None, optimizer = None, scheduler = None, device = "cuda"):
-    checkpoint = torch.load (path, map_location = device)
-    model.load_state_dict (checkpoint ["model"])
-    if ema and "ema" in checkpoint:
-        ema.module.load_state_dict (checkpoint ["ema"])
-    if optimizer and "optimizer" in checkpoint:
-        optimizer.load_state_dict (checkpoint ["optimizer"])
-    if scheduler and "scheduler" in checkpoint:
-        scheduler.load_state_dict (checkpoint ["scheduler"])
-    print ("Loaded checkpoint:", path)
