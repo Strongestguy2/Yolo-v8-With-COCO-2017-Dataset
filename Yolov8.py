@@ -1039,6 +1039,7 @@ class YoloModel (nn.Module):
 
 #forward smoke test
 model = YoloModel (num_classes = CFG ["num_classes"], backbone = CFG ["backbone"], head_hidden = CFG ["head_hidden"], fpn_out = 256).to (device)
+model.criterion = criterion
 
 x = torch.randn (2, 3, CFG ["imgsz"], CFG ["imgsz"], device = device)
 with torch.no_grad ():
@@ -1419,36 +1420,41 @@ criterion = DetectionLoss (
 
 optimizer, scheduler = build_optimizer (model, CFG)
 
-def train_step(model, batch, device):
-    model.train()
+def train_step (model, batch, device):
+    model.train ()
     images, targets = batch
-    images = images.to(device, non_blocking=True)
+    images = images.to (device, non_blocking = True)
 
-    optimizer.zero_grad(set_to_none=True)
+    optimizer.zero_grad (set_to_none = True)
 
-    with torch.cuda.amp.autocast(enabled=CFG.get("amp", True)):
-        out = model(images, targets)         # your forward that returns losses
-        loss = out["loss"]                   # keep your keys
-        loss_box = out["loss_box"]
-        loss_cls = out["loss_cls"]
-        num_pos  = out["num_pos"]
+    with torch.cuda.amp.autocast (enabled = CFG.get ("amp", True)):
+        out = model (images, targets)
+        loss = out ["loss"]
+        loss_box = out.get ("loss_box", 0.0)
+        loss_cls = out.get ("loss_cls", 0.0)
+        num_pos = out.get ("num_pos", 0.0)
 
-    # backward + (optional) clip + step
-    scaler.scale(loss).backward()
+        if not torch.is_tensor (loss_box):
+            loss_box = torch.as_tensor (loss_box, device = loss.device, dtype = loss.dtype)
+        if not torch.is_tensor (loss_cls):
+            loss_cls = torch.as_tensor (loss_cls, device = loss.device, dtype = loss.dtype)
+        if not torch.is_tensor (num_pos):
+            num_pos = torch.as_tensor (num_pos, device = loss.device, dtype = loss.dtype)
 
-    if CFG.get("grad_clip_norm", None):
-        # unscale *once* here
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), CFG["grad_clip_norm"])
+    scaler.scale (loss).backward ()
 
-    scaler.step(optimizer)   # moves weights
-    scaler.update()
+    if CFG.get ("grad_clip_norm", None):
+        scaler.unscale_ (optimizer)
+        torch.nn.utils.clip_grad_norm_ (model.parameters (), CFG ["grad_clip_norm"])
+
+    scaler.step (optimizer)
+    scaler.update ()
 
     stats = {
-        "loss": float(loss.detach().item()),
-        "loss_box": float(loss_box.detach().item()),
-        "loss_cls": float(loss_cls.detach().item()),
-        "num_pos": float(num_pos),
+        "loss": float (loss.detach ().item ()),
+        "loss_box": float (loss_box.detach ().item ()),
+        "loss_cls": float (loss_cls.detach ().item ()),
+        "num_pos": float (num_pos.detach ().item ())
     }
     return stats
 
