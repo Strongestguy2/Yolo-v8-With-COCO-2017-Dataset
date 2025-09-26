@@ -1037,7 +1037,16 @@ class YoloModel (nn.Module):
       # Inference path: return raw predictions
       return head_out
 
+model = YoloModel (num_classes = CFG ["num_classes"], backbone = CFG ["backbone"], head_hidden = CFG ["head_hidden"], fpn_out = 256).to (device)
 
+x = torch.randn (2, 3, CFG ["imgsz"], CFG ["imgsz"], device = device)
+with torch.no_grad ():
+    out = model (x)
+    
+print ("Levels:", len (out ["features"]))
+
+for i, (c, b) in enumerate (zip (out ["cls"], out ["box"])):
+    print (f"Level {i}: cls: {tuple (c.shape)}, box: {tuple (b.shape)}, stride: {model.strides [i]}")
 #Stage 5
 
 
