@@ -1,50 +1,54 @@
 # i hate to set things up, but here i am doing all these stuff before training the model dammnit
 #have to run
-# %pip -q install fiftyone
+
+%pip -q install fiftyone
+
 import fiftyone as fo
 import fiftyone.zoo as foz
 import os, json, sys
 from datetime import datetime
 
 from google.colab import drive
-drive.mount('/content/drive')
+drive.mount ("/content/drive")
 
 BASE_DIR = "/content/drive/MyDrive/yolo-lab"
 DIRS = {
-    "datasets":   os.path.join(BASE_DIR, "datasets"),
-    "runs":       os.path.join(BASE_DIR, "runs"),
-    "checkpoints":os.path.join(BASE_DIR, "checkpoints"),
-    "configs":    os.path.join(BASE_DIR, "configs"),
-    "outputs":    os.path.join(BASE_DIR, "outputs"),
+    "datasets" : os.path.join (BASE_DIR, "datasets"),
+    "runs" : os.path.join (BASE_DIR, "runs"),
+    "checkpoints" : os.path.join (BASE_DIR, "checkpoints"),
+    "configs" : os.path.join (BASE_DIR, "configs"),
+    "outputs" : os.path.join (BASE_DIR, "outputs"),
 }
-for d in DIRS.values(): os.makedirs(d, exist_ok=True)
 
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+for d in DIRS.values ():
+    os.makedirs (d, exist_ok = True)
+
+timestamp = datetime.now().strftime ("%Y%m%d_%H%M%S")
 EXP_NAME  = "yolov8_coco_proto"
 RUN_NAME  = f"{timestamp}_{EXP_NAME}"
-RUN_DIR   = os.path.join(DIRS["runs"], RUN_NAME)
-os.makedirs(RUN_DIR, exist_ok=True)
+RUN_DIR   = os.path.join (DIRS ["runs"], RUN_NAME)
+os.makedirs (RUN_DIR, exist_ok = True)
 FO_CACHE_DIR = "/content/fo_cache"
 fo.config.default_dataset_dir = FO_CACHE_DIR
-os.makedirs(FO_CACHE_DIR, exist_ok=True)
-DATASET_YAML = os.path.join(DIRS["configs"], "dataset.yaml")
+os.makedirs (FO_CACHE_DIR, exist_ok = True)
+DATASET_YAML = os.path.join (DIRS ["configs"], "dataset.yaml")
 VAL_DS_NAME  = "coco2017_val500_fixed"
-VAL_TXT = os.path.join(DIRS["datasets"], "val_filepaths.txt")
+VAL_TXT = os.path.join (DIRS ["datasets"], "val_filepaths.txt")
 
-if not os.path.exists(VAL_TXT):
-    ds_val = foz.load_zoo_dataset(
+if not os.path.exists (VAL_TXT):
+    ds_val = foz.load_zoo_dataset (
         "coco-2017",
-        splits=["validation"],
-        label_types=["detections"],
-        max_samples=500,
-        shuffle=True,
-        seed=1234,
-        dataset_name=VAL_DS_NAME,
-        drop_existing=True,
+        splits = ["validation"],
+        label_types = ["detections"],
+        max_samples = 500,
+        shuffle = True,
+        seed = 1234,
+        dataset_name = VAL_DS_NAME,
+        drop_existing = True,
     )
-    with open(VAL_TXT, "w") as f:
+    with open (VAL_TXT, "w") as f:
         for s in ds_val:
-            f.write(s.filepath + "\n")
+            f.write (s.filepath + "\n")
 else:
     pass
 
@@ -57,15 +61,15 @@ META = {
   "DATASET_YAML": DATASET_YAML,
   "created_at": timestamp,
 }
-with open(os.path.join(RUN_DIR, "run_meta.json"), "w") as f:
-  json.dump(META, f, indent=2)
+with open (os.path.join (RUN_DIR, "run_meta.json"), "w") as f:
+  json.dump (META, f, indent = 2)
 
-print("YOLO bootstrap ready. :))))))))))")
-print("BASE_DIR:", BASE_DIR)
-print("RUN_DIR :", RUN_DIR)
-print("DATASET_YAML (to create):", DATASET_YAML)
+print ("YOLO bootstrap ready. :))))))))))")
+print ("BASE_DIR:", BASE_DIR)
+print ("RUN_DIR :", RUN_DIR)
+print ("DATASET_YAML (to create):", DATASET_YAML)
 
-#run
+#config
 from pprint import pprint
 import os, json
 
@@ -82,52 +86,52 @@ with open (DATASET_YAML, "w") as f:
 print ("Wrote dataset.yaml ->", DATASET_YAML)
 
 CFG = {
-    "exp_name": EXP_NAME,
-    "project_dir": DIRS ["runs"],
-    "run_name": RUN_NAME,
-    "save_period": 1,
-    "resume": True,
-    "seed": 42,
-    "viz_every": 200,
+    "exp_name" : EXP_NAME,
+    "project_dir" : DIRS ["runs"],
+    "run_name" : RUN_NAME,
+    "save_period" : 1,
+    "resume" : True,
+    "seed" : 42,
+    "viz_every" : 200,
 
-    "data_root": "/content/yolo_data",
-    "train_img_dir": "images/train",
-    "val_img_dir":   "images/val",
-    "train_lbl_dir": "labels/train",
-    "val_lbl_dir":   "labels/val",
-    "num_classes": 80,
-    "imgsz": 640,
-    "letterbox_pad": 114,
+    "data_root" : "/content/yolo_data",
+    "train_img_dir" : "images/train",
+    "val_img_dir" : "images/val",
+    "train_lbl_dir" : "labels/train",
+    "val_lbl_dir" : "labels/val",
+    "num_classes" : 80,
+    "imgsz" : 640,
+    "letterbox_pad" : 114,
 
-    "hflip_p": 0.5,
-    "hsv_h": 0.015, "hsv_s": 0.7, "hsv_v": 0.4,
-    "scale_range": [0.9, 1.1],
-    "translate": 0.10,
+    "hflip_p" : 0.5,
+    "hsv_h" : 0.015, "hsv_s" : 0.7, "hsv_v" : 0.4,
+    "scale_range" : [0.9, 1.1],
+    "translate" : 0.10,
 
-    "strides": [8, 16, 32],
-    "backbone": "resnet50_fpn",
-    "head_hidden": 256,
-    "box_param": "ltrb",
-    "use_obj_branch": True,
+    "strides" : [8, 16, 32],
+    "backbone" : "resnet50_fpn",
+    "head_hidden" : 256,
+    "box_param" : "ltrb",
+    "use_obj_branch" : True,
 
     # optimization
-    "epochs": 50,
-    "batch_size": 16,
-    "optimizer": "adamw",
-    "lr": 2e-4,
-    "weight_decay": 0.05,
-    "warmup_epochs": 3,
-    "cosine_schedule": True,
-    "amp": True,
-    "grad_clip_norm": 10.0,
-    "ema_decay": 0.9998,
+    "epochs" : 50,
+    "batch_size" : 16,
+    "optimizer" : "adamw",
+    "lr" : 2e-4,
+    "weight_decay" : 0.05,
+    "warmup_epochs" : 3,
+    "cosine_schedule" : True,
+    "amp" : True,
+    "grad_clip_norm" : 10.0,
+    "ema_decay" : 0.9998,
 
-    "assigner": "center_prior",
-    "iou_type": "ciou",
-    "loss_weights": {"box": 2.5, "cls": 1.0, "obj": 1.0, "dfl": 0.0},
+    "assigner" : "center_prior",
+    "iou_type" : "ciou",
+    "loss_weights" : {"box" : 2.5, "cls" : 1.0, "obj" : 1.0, "dfl" : 0.0},
 }
-pprint(CFG)
 
+pprint (CFG)
 
 import os, json, subprocess, glob
 from collections import defaultdict, Counter
@@ -139,10 +143,10 @@ import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-#run
 
 import shutil
 
+#load and download next chunk
 import time
 import fiftyone as fo
 import fiftyone.zoo as foz
@@ -151,104 +155,100 @@ from fiftyone import ViewField as F
 DS_TRAIN_ROLL = "coco2017_train_roll2k"
 TARGET = 2000
 
-def load_next_train_chunk(seen_paths, tries=6):
-    seen_paths = list(seen_paths)  # ensure iterable is a list
-    for _ in range(tries):
-        seed = int(time.time()) % 2_000_000_000
-        ds = foz.load_zoo_dataset(
+def load_next_train_chunk (seen_paths, tries=6):
+    seen_paths = list (seen_paths)
+    for _ in range (tries):
+        seed = int (time.time ()) % 2_000_000_000
+        ds = foz.load_zoo_dataset (
             "coco-2017",
-            splits=["train"],
-            label_types=["detections"],
-            max_samples=TARGET,
-            shuffle=True,
-            seed=seed,
-            dataset_name=DS_TRAIN_ROLL,
-            drop_existing=True,
+            splits = ["train"],
+            label_types = ["detections"],
+            max_samples = TARGET,
+            shuffle = True,
+            seed = seed,
+            dataset_name = DS_TRAIN_ROLL,
+            drop_existing = True,
         )
 
-        # keep samples whose filepath is NOT in seen_paths
-        fresh = ds.match(~F("filepath").is_in(seen_paths))
+        fresh = ds.match (~F ("filepath").is_in (seen_paths))
 
-        n = len(fresh)
-        if n >= int(0.9 * TARGET):
-            print(f"Using train chunk with {n} fresh samples (seed={seed})")
+        n = len (fresh)
+        if n >= int (0.9 * TARGET):
+            print (f"Using train chunk with {n} fresh samples (seed={seed})")
             return fresh
 
-        print(f"Overlap too high ({n} fresh). Retrying...")
+        print (f"Overlap too high ({n} fresh). Retrying...")
 
-    print(f"Proceeding with {n} fresh after retries")
+    print (f"Proceeding with {n} fresh after retries")
     return fresh
 
 
+#manage seen samples and next unseen chunk
 
-#after 4a heavy
-SEEN_TXT = os.path.join(DIRS["datasets"], "seen_filepaths.txt")
-CURR_CHUNK_TXT = os.path.join(DIRS["datasets"], "current_chunk_paths.txt")
+SEEN_TXT = os.path.join (DIRS ["datasets"], "seen_filepaths.txt")
+CURR_CHUNK_TXT = os.path.join (DIRS ["datasets"], "current_chunk_paths.txt")
 
-def _load_seen():
-    if not os.path.exists(SEEN_TXT): return set()
-    with open(SEEN_TXT, "r") as f:
-        return set(l.strip() for l in f if l.strip())
+def _load_seen ():
+    if not os.path.exists (SEEN_TXT): 
+        return set ()
+    with open (SEEN_TXT, "r") as f:
+        return set (l.strip () for l in f if l.strip ())
 
-def _stage_image(src, dst):
-    if not os.path.exists(dst):
-        try:
-            os.symlink(src, dst)
-        except OSError:
-            import shutil
-            shutil.copy2(src, dst)
+def _save_current_chunk (paths):
+    with open (CURR_CHUNK_TXT, "w") as f:
+        for p in paths: 
+            f.write (p + "\n")
 
-def _append_seen(paths):
-    # merge-dedupe
-    seen = _load_seen().union(paths)
-    with open(SEEN_TXT, "w") as f:
-        for p in sorted(seen): f.write(p + "\n")
+def get_chunk_by_index (ds, split = "train", k = 2000, chunk_index = 0):
+    base = ds.match_tags (split).sort_by ("filepath")
+    return base.skip (chunk_index * k).limit (k)
 
-def _save_current_chunk(paths):
-    with open(CURR_CHUNK_TXT, "w") as f:
-        for p in paths: f.write(p + "\n")
+def _append_seen (paths):
+    seen = _load_seen ().union (paths)
+    with open (SEEN_TXT, "w") as f:
+        for p in sorted (seen): 
+            f.write (p + "\n")
 
-def get_chunk_by_index(ds, split="train", k=2000, chunk_index=0):
-    base = ds.match_tags(split).sort_by("filepath")
-    return base.skip(chunk_index * k).limit(k)
-
-def get_next_unseen_chunk(ds, split="train", k=2000):
-    seen = _load_seen()
-    base = ds.match_tags(split).sort_by("filepath")
-    ids, paths = [], []
+def get_next_unseen_chunk (ds, split = "train", k = 2000):
+    seen = _load_seen ()
+    base = ds.match_tags (split).sort_by ("filepath")
+    ids = []
+    paths = []
+    
     for s in base:
         if s.filepath not in seen:
-            ids.append(s.id); paths.append(s.filepath)
-            if len(ids) >= k: break
+            ids.append (s.id)
+            paths.append (s.filepath)
+            if len (ids) >= k: 
+                break
     if not ids:
-        print(f"No unseen samples left in {split}")
+        print (f"No unseen samples left in {split}")
         return None
-    view = base.select(ids)
-    _save_current_chunk(paths)
+    view = base.select (ids)
+    _save_current_chunk (paths)
     return view
 
-
-#after 4b
+# export
 ROOT = "/content/yolo_data"
 IMG_TRAIN = f"{ROOT}/images/train"
 IMG_VAL   = f"{ROOT}/images/val"
 LBL_TRAIN = f"{ROOT}/labels/train"
 LBL_VAL   = f"{ROOT}/labels/val"
 for p in [IMG_TRAIN, IMG_VAL, LBL_TRAIN, LBL_VAL]:
-    os.makedirs(p, exist_ok=True)
+    os.makedirs (p, exist_ok = True)
 
 COCO_NAMES = [
-  "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light",
-  "fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow",
-  "elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase",
-  "frisbee","skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard",
-  "surfboard","tennis racket","bottle","wine glass","cup","fork","knife","spoon","bowl",
-  "banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake",
-  "chair","couch","potted plant","bed","dining table","toilet","tv","laptop","mouse","remote",
-  "keyboard","cell phone","microwave","oven","toaster","sink","refrigerator","book","clock",
-  "vase","scissors","teddy bear","hair drier","toothbrush"
+  "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+  "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+  "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase",
+  "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+  "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl",
+  "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
+  "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
+  "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock",
+  "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
 ]
-name_to_idx = {n:i for i,n in enumerate(COCO_NAMES)}
+name_to_idx = {n : i for i, n in enumerate (COCO_NAMES)}
 
 def detections_field (dataset):
     schema = dataset.get_field_schema ()
@@ -262,61 +262,43 @@ def detections_field (dataset):
                 pass
     return "ground_truth"
 
-def _clean_dir(pat_list):
-    import os, glob
+def _clean_dir (pat_list):
     for pat in pat_list:
         for p in glob.glob(pat):
             try: os.remove(p)
             except: pass
 
-def symlink_and_write_labels(sample_collection, split: str):
-    field = detections_field(sample_collection._dataset)
-    img_dir = IMG_TRAIN if split=="train" else IMG_VAL
-    lbl_dir = LBL_TRAIN if split=="train" else LBL_VAL
-    _clean_dir([os.path.join(img_dir, "*"), os.path.join(lbl_dir, "*.txt")])
+def symlink_and_write_labels (sample_collection, split: str):
+    field = detections_field (sample_collection._dataset)
 
-    wrote = 0; bad_boxes = 0
+    if split == "train":
+        img_dir = IMG_TRAIN
+        lbl_dir = LBL_TRAIN
+    else:
+        img_dir = IMG_VAL
+        lbl_dir = LBL_VAL
+
+    _clean_dir ([os.path.join (img_dir, "*"), os.path.join (lbl_dir, "*.txt")])
+
+    wrote = 0
+    bad_boxes = 0
     paths_this_chunk = []
 
     for s in sample_collection:
         src  = s.filepath
-        stem = Path(src).stem
-        ext  = Path(src).suffix.lower()
-        dst_img = os.path.join(img_dir, f"{split}__{stem}{ext}")
-        if not os.path.exists(dst_img):
-            os.symlink(src, dst_img)
-
-        paths_this_chunk.append(src)
-
-        dets = getattr(s, field, None)
-        lines = []
-        if dets and dets.detections:
-            for d in dets.detections:
-                x, y, w, h = d.bounding_box
-                if not (0 <= x <= 1 and 0 <= y <= 1 and 0 <= w <= 1 and 0 <= h <= 1):
-                    bad_boxes += 1; continue
-                cls = name_to_idx.get(d.label, None)
-                if cls is None: continue
-                cx = min(max(x + w/2, 0.0), 1.0)
-                cy = min(max(y + h/2, 0.0), 1.0)
-                lines.append(f"{cls} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
-
-        with open(os.path.join(lbl_dir, f"{split}__{stem}.txt"), "w") as f:
-            f.write("\n".join(lines))
-        wrote += 1
-
-    print(f"✅ {split}: wrote {wrote} labels; bad boxes skipped: {bad_boxes}")
-    # also remember this chunk's filepaths (for deletion)
-    _save_current_chunk(paths_this_chunk)
-
+        stem = Path (src).stem
+        ext  = Path (src).suffix.lower()
+        dst_img = os.path.join (img_dir, f"{split}__{stem}{ext}")
+        if not os.path.exists (dst_img):
+            os.symlink (src, dst_img)
 
 def stage_train_chunk ():
     seen = _load_seen ()
     view = load_next_train_chunk (seen)
     symlink_and_write_labels (view, "train")
-    print("[TRAIN] staged ~2000 training samples.")
+    print ("staged ~2000 training samples.")
 
-def stage_val_once():
+def stage_val_once ():
 
     ds_val = foz.load_zoo_dataset (
         "coco-2017",
@@ -328,61 +310,56 @@ def stage_val_once():
         dataset_name = "coco2017_val500_fixed",
         drop_existing = False,
     )
-    # Stage to /content/yolo_data/{images,labels}/val
-    symlink_and_write_labels(ds_val, "val")
-    print("[VAL] staged ~500 validation samples.")
+    # /content/yolo_data/{images,labels}/val
+    symlink_and_write_labels (ds_val, "val")
+    print ("staged ~500 validation samples.")
 
-# call it here so Run-All always has val staged
-stage_val_once()
+stage_val_once ()
 
-#RUN AFTER TRAINING , RUN WITH CAUTION!!!!!!!!!!
+#disposing chunks after fully trained
 import shutil, os
 
 def _reset_working_set ():
-    shutil.rmtree ("/content/yolo_data", ignore_errors=True)
-    for p in [
-        "/content/yolo_data/images/train",
-        "/content/yolo_data/images/val",
-        "/content/yolo_data/labels/train",
-        "/content/yolo_data/labels/val",
-    ]:
-        os.makedirs(p, exist_ok=True)
+    shutil.rmtree ("/content/yolo_data", ignore_errors = True)
+    for p in ["/content/yolo_data/images/train", "/content/yolo_data/images/val", "/content/yolo_data/labels/train", "/content/yolo_data/labels/val",]:
+        os.makedirs (p, exist_ok = True)
 
-def _safe_remove_media(paths, root=FO_CACHE_DIR):
+def _safe_remove_media (paths, root = FO_CACHE_DIR):
     deleted = missing = skipped = 0
-    root_abs = os.path.abspath(root) + os.sep
+    root_abs = os.path.abspath (root) + os.sep
+    
     for p in paths:
-        ap = os.path.abspath(p)
-        if not ap.startswith(root_abs):
+        ap = os.path.abspath (p)
+        if not ap.startswith (root_abs):
             skipped += 1
             continue
         try:
-            os.remove(ap); deleted += 1
+            os.remove (ap)
+            deleted += 1
         except FileNotFoundError:
             missing += 1
         except Exception as e:
-            print("Delete error:", ap, e)
-    print(f"Cache cleanup: deleted {deleted}, missing {missing}, skipped {skipped}")
+            print ("Delete error:", ap, e)
+    print (f"Cache cleanup: deleted {deleted}, missing {missing}, skipped {skipped}")
 
-def dispose_current_chunk(delete_from_cache=True, mark_seen=True):
-    _reset_working_set()
+def dispose_current_chunk (delete_from_cache = True, mark_seen = True):
+    _reset_working_set ()
 
-    if os.path.exists(CURR_CHUNK_TXT):
-        with open(CURR_CHUNK_TXT, "r") as f:
-            paths = [l.strip() for l in f if l.strip()]
+    if os.path.exists (CURR_CHUNK_TXT):
+        with open (CURR_CHUNK_TXT, "r") as f:
+            paths = [l.strip () for l in f if l.strip()]
 
         if delete_from_cache and paths:
-            _safe_remove_media(paths, root=FO_CACHE_DIR)
+            _safe_remove_media (paths, root = FO_CACHE_DIR)
 
         if mark_seen and paths:
-            _append_seen(paths)
+            _append_seen (paths)
 
-        open(CURR_CHUNK_TXT, "w").close()
+        open (CURR_CHUNK_TXT, "w").close ()
 
-    print("Disposed current chunk.")
+    print ("Disposed current chunk.")
 
-
-#Stage 3
+Stage 3
 
 #still preparing, let me cook
 def set_seed (seed = 42):
@@ -576,11 +553,11 @@ class YoloDataset (Dataset):
         }
         return image, target
 
-#-----
 #colate function and dataloaders
 import os
 def collate_fn (batch):
     images, targets = list (zip (*batch))
+    B = len (images)
     images = torch.stack (images, dim = 0)
 
     all_boxes = []
@@ -591,36 +568,36 @@ def collate_fn (batch):
     pads = []
     orig_sizes = []
 
-    for i, target in enumerate (targets):
-        num_boxes = target ["boxes"].shape [0]
+    for i, t in enumerate (targets):
+        n = t ["boxes"].shape [0]
 
-        if num_boxes:
-            all_boxes.append (target ["boxes"])
-            all_labels.append (target ["labels"])
-            all_bidx.append (torch.full ((num_boxes,), i, dtype = torch.int64))
+        if n:
+            all_boxes.append (t ["boxes"])
+            all_labels.append (t ["labels"])
+            all_bidx.append (torch.full ((n,), i, dtype = torch.int64))
 
-        image_ids.append (target ["image_id"])
-        scales.append (target ["scale"])
-        pads.append (target ["pad"])
-        orig_sizes.append (target ["orig_size"])
+        image_ids.append (t ["image_id"])
+        scales.append (t ["scale"])
+        pads.append (t ["pad"])
+        orig_sizes.append(t ["orig_size"])
 
     if len (all_boxes):
         boxes = torch.cat (all_boxes, 0)
         labels = torch.cat (all_labels, 0)
-        batch_index = torch.cat (all_bidx, 0)
+        bidx = torch.cat (all_bidx, 0)
     else:
         boxes = torch.zeros ((0, 4), dtype = torch.float32)
         labels = torch.zeros ((0,), dtype = torch.int64)
-        batch_index = torch.zeros ((0,), dtype = torch.int64)
+        bidx = torch.zeros ((0,), dtype = torch.int64)
 
     return images, {
         "boxes": boxes,
         "labels": labels,
-        "batch_index": batch_index,
+        "batch_index": bidx,
         "image_id": image_ids,
         "scale": scales,
         "pad": pads,
-        "orig_size": orig_sizes,
+        "orig_size": orig_sizes
     }
 
 def _wif (worker_id):
@@ -859,7 +836,7 @@ print("✅ Sanity check done.")
 # ==== END SANITY CHECK ====
 
 
-#Stage 4: Finally the actual model, Backbone
+Stage 4: Finally the actual model, Backbone
 
 
 #the fun part - backbone and fpn finally!!!!!!!!!!
@@ -988,7 +965,7 @@ class YoloV8LiteHead (nn.Module):
         return cls_outs, box_outs
 
 class YoloModel (nn.Module):
-    def __init__ (self, num_classes = 80, backbone = "resnet50_fpn", head_hidden = 256, fpn_out = 256, criterion = None):
+    def __init__ (self, num_classes = 80, backbone = "resnet50_fpn", head_hidden = 256, fpn_out = 256):
         super ().__init__ ()
         assert backbone == "resnet50_fpn", "only resnet50_fpn wired in this mvp"
         self.backbone = ResNet50Backbone (pretrained = False)
@@ -996,7 +973,6 @@ class YoloModel (nn.Module):
         self.neck = FPN (c3 = 512, c4 = 1024, c5 = 2048, out_ch = fpn_out)
         self.head = YoloV8LiteHead (in_ch = fpn_out, num_classes = num_classes, hidden = head_hidden, num_levels  = 3)
         self.strides = [8, 16, 32]
-        self.criterion = criterion
 
     def forward(self, x, targets=None):
       c3, c4, c5 = self.backbone(x)
@@ -1037,22 +1013,24 @@ class YoloModel (nn.Module):
       # Inference path: return raw predictions
       return head_out
 
+
+#forward smoke test
 model = YoloModel (num_classes = CFG ["num_classes"], backbone = CFG ["backbone"], head_hidden = CFG ["head_hidden"], fpn_out = 256).to (device)
 
 x = torch.randn (2, 3, CFG ["imgsz"], CFG ["imgsz"], device = device)
 with torch.no_grad ():
     out = model (x)
-    
+
 print ("Levels:", len (out ["features"]))
 
 for i, (c, b) in enumerate (zip (out ["cls"], out ["box"])):
     print (f"Level {i}: cls: {tuple (c.shape)}, box: {tuple (b.shape)}, stride: {model.strides [i]}")
-#Stage 5
+
+Stage 5
 
 
 #forward pass
 import torch
-
 #grid and decode utilities
 def make_grid (features_h, features_w, stride, device):
     #return grid centers in input/letterbox ccoords
@@ -1181,7 +1159,7 @@ print (f"[SMOKE] got {len(dets)} detection lists for batch size {xbv.shape [0]}"
 for i, d in enumerate (dets [:2]):
     print(f" img{i}: boxes {tuple (d ['boxes'].shape)}  scores {tuple (d ['scores'].shape)}  classes {tuple(d['classes'].shape)}")
 
-#Stage 6
+Stage 6
 
 
 #box ops (IoU)
@@ -1332,63 +1310,83 @@ class DetectionLoss (nn.Module):
         self.lambda_box = lambda_box
         self.lambda_cls = lambda_cls
 
-    def forward (self, model_out, targets):
-        #out: {"cls": [L], "box"...}
-        #cls [l] = (B,C,H,W) logits
-        #box [l] = (B,4,H,W) LTRB dist >= 0
-        #targets: dict from collate_fn
+    def forward(self, head_out, targets):
+        # head_out: {"features": [p3, p4, p5], "cls": cls_outs, "box": box_outs, "strides": self.strides}
+        # targets: {"boxes": ..., "labels": ..., "batch_index": ...}
 
-        B = model_out ["cls"][0].shape[0]
-        device = model_out ["cls"][0].device
+        cls_outs = head_out ["cls"]
+        box_outs = head_out ["box"]
+        strides = head_out ["strides"]
 
-        scores_list, boxes_list = flatten_head_outputs (model_out ["cls"], model_out ["box"], self.strides, self.image_size)
+        # Flatten head outputs per image
+        scores_list, boxes_list = flatten_head_outputs (cls_outs, box_outs, strides, self.image_size)
 
-        per_image_targets, _ = build_targets_center_prior (targets, num_classes = self.num_classes, image_size = self.image_size, strides = self.strides, device = device)
+        # Build targets
+        per_image_targets, levels = build_targets_center_prior (
+            targets,
+            num_classes = self.num_classes,
+            image_size = self.image_size,
+            strides = self.strides,
+            topk = 10, # Hardcoded for now, consider making this a config param
+            center_radius = 2.5, # Hardcoded for now
+            device = cls_outs [0].device,
+        )
 
-        total_cls = torch.tensor (0.0, device = device)
-        total_box = torch.tensor (0.0, device = device)
-        total_pos = 0
+        total_loss = torch.zeros (1, device = cls_outs [0].device)
+        loss_box_sum = torch.zeros (1, device = cls_outs [0].device)
+        loss_cls_sum = torch.zeros (1, device = cls_outs [0].device)
+        num_pos_sum = 0
 
-        for i in range (B):
-            logits = scores_list [i]
-            predict_ltrb = None
-            predict_xyxy = boxes_list [i]
+        for i in range (len (scores_list)):
+            # per-image outputs and targets
+            img_scores = scores_list [i] # (N, C)
+            img_boxes  = boxes_list [i] # (N, 4)
+            t_cls, t_box_letterbox, position_mask, matched_gt_index = per_image_targets [i]
 
-            t_cls, t_ltrb, pos_mask, matched_index = per_image_targets [i]
-            N = logits.shape [0]
+            pos_index = torch.nonzero (position_mask, as_tuple = False).flatten ()
+            num_pos = pos_index.numel ()
+            num_pos_sum += num_pos
 
-            cls_loss = F.binary_cross_entropy_with_logits (logits, t_cls, reduction = "none") / max (N, 1)
-            total_cls += cls_loss.sum ()
+            # Classification loss (BCE with logits)
+            loss_cls = F.binary_cross_entropy_with_logits (img_scores, t_cls, reduction = "none")
+            loss_cls = loss_cls.sum () / max (1, num_pos) if num_pos else loss_cls.sum () * 0.0 #sum over classes, mean over pos locations
 
-            if pos_mask.any ():
-                predict_xy = predict_xyxy [pos_mask]
+            # Box loss (IoU)
+            loss_box = torch.zeros (1, device = img_boxes.device)
+            if num_pos:
+                pred_boxes_pos = img_boxes [pos_index]
+                target_boxes_pos = t_box_letterbox [pos_index]
+                loss_box = iou_loss (pred_boxes_pos, target_boxes_pos).sum () / num_pos
 
-                levels = _make_level_grids (self.image_size, self.strides, device)
-                centers_x_all = torch.cat ([L ["cx"] for L in levels], dim = 0)
-                centers_y_all = torch.cat ([L ["cy"] for L in levels], dim = 0)
-                pos_index = torch.nonzero (pos_mask, as_tuple = False).flatten ()
-                cxp = centers_x_all [pos_index]
-                cyp = centers_y_all [pos_index]
-                ltrb = t_ltrb [pos_mask]
-                l, t, r, b = ltrb.unbind (-1)
-                target_xy = torch.stack ([cxp - l, cyp - t, cxp + r, cyp + b], dim = -1)
+            total_loss += self.lambda_cls * loss_cls + self.lambda_box * loss_box
+            loss_box_sum += loss_box
+            loss_cls_sum += loss_cls
 
-                box_loss = iou_loss (predict_xy, target_xy).mean ()
-                total_box += box_loss
-                total_pos += ltrb.shape [0]
+        # Average losses over images in batch
+        B = len(scores_list)
+        total_loss /= B
+        loss_box_sum /= B
+        loss_cls_sum /= B
+        num_pos_avg = num_pos_sum / B
 
-        total = self.lambda_cls * total_cls + self.lambda_box * total_box
-
-        stats = {
-            "loss": float (total.detach ().item ()),
-            "loss_cls": float (total_cls.detach ().item ()),
-            "loss_box": float (total_box.detach ().item ()),
-            "num_pos": int (total_pos),
+        return total_loss, {
+            "loss_box": loss_box_sum,
+            "loss_cls": loss_cls_sum,
+            "num_pos": num_pos_avg,
         }
-        return total, stats
 
 from torch.amp import GradScaler, autocast
 
+criterion = DetectionLoss(
+    num_classes = CFG["num_classes"],
+    image_size  = CFG["imgsz"],
+    strides     = [8, 16, 32],
+    lambda_box  = CFG["loss_weights"]["box"],
+    lambda_cls  = CFG["loss_weights"]["cls"],
+)
+
+# ✨ attach it here
+model.criterion = criterion
 
 #optimizer + 1 training step with AMP
 
@@ -1407,102 +1405,87 @@ def build_optimizer (model, cfg):
 
 scaler = GradScaler (enabled = CFG ["amp"])
 
-def build_model(cfg = CFG, device_arg = device):
-    """Construct a ``YoloModel`` along with its loss criterion.
-
-    Keeping the helper makes it easy for external scripts (like ``YoloMain``)
-    to import this module and request a fresh model instance without relying
-    on globals that may or may not have executed yet.
-    """
-
-    criterion = DetectionLoss (
-        num_classes = cfg ["num_classes"],
-        image_size = cfg ["imgsz"],
-        strides = [8, 16, 32],
-        lambda_box = cfg ["loss_weights"] ["box"],
-        lambda_cls = cfg ["loss_weights"] ["cls"],
-    )
-
-    model = YoloModel (
-        num_classes = cfg ["num_classes"],
-        backbone = cfg ["backbone"],
-        head_hidden = cfg ["head_hidden"],
-        fpn_out = 256,
-        criterion = criterion,
-    ).to (device_arg)
-
-    return model, criterion
-
-
-model, criterion = build_model ()
-
-#forward smoke test
-x = torch.randn (2, 3, CFG ["imgsz"], CFG ["imgsz"], device = device)
-with torch.no_grad ():
-    out = model (x)
-
-print ("Levels:", len (out ["features"]))
-
-for i, (c, b) in enumerate (zip (out ["cls"], out ["box"])):
-    print (f"Level {i}: cls: {tuple (c.shape)}, box: {tuple (b.shape)}, stride: {model.strides [i]}")
-
-model = YoloModel (
-    num_classes = CFG ["num_classes"],
-    backbone = CFG ["backbone"],
-    head_hidden = CFG ["head_hidden"],
-    fpn_out = 256,
-    criterion = criterion,
-).to (device)
-
-#forward smoke test
-x = torch.randn (2, 3, CFG ["imgsz"], CFG ["imgsz"], device = device)
-with torch.no_grad ():
-    out = model (x)
-
-print ("Levels:", len (out ["features"]))
-
-for i, (c, b) in enumerate (zip (out ["cls"], out ["box"])):
-    print (f"Level {i}: cls: {tuple (c.shape)}, box: {tuple (b.shape)}, stride: {model.strides [i]}")
+# criterion is already defined above and attached to the model
+# criterion = DetectionLoss (
+#     num_classes = CFG ["num_classes"],
+#     image_size = CFG ["imgsz"],
+#     strides = [8, 16, 32],
+#     lambda_box = CFG ["loss_weights"] ["box"],
+#     lambda_cls = CFG ["loss_weights"] ["cls"],
+# )
 
 optimizer, scheduler = build_optimizer (model, CFG)
 
-def train_step (model, batch, device):
-    model.train ()
+def _standardize_losses(losses, stats=None):
+    """
+    Normalize arbitrary (losses, stats) into a dict:
+      {"loss": Tensor, "loss_box": Tensor, "loss_cls": Tensor, "num_pos": float}
+    """
+    if torch.is_tensor(losses):
+        total = losses
+        lb = stats.get("loss_box", total.detach()*0) if isinstance(stats, dict) else total.detach()*0
+        lc = stats.get("loss_cls", total.detach()*0) if isinstance(stats, dict) else total.detach()*0
+        np_ = float(stats.get("num_pos", 0)) if isinstance(stats, dict) else 0.0
+        return {"loss": total, "loss_box": lb, "loss_cls": lc, "num_pos": np_}
+
+    if isinstance(losses, dict):
+        # try common keys
+        total = losses.get("loss") or losses.get("total_loss") or losses.get("overall")
+        if total is None:
+            # fallback: sum all tensor values
+            total = sum([v for v in losses.values() if torch.is_tensor(v)])
+        lb = losses.get("loss_box", (stats.get("loss_box") if isinstance(stats, dict) else total.detach()*0))
+        lc = losses.get("loss_cls", (stats.get("loss_cls") if isinstance(stats, dict) else total.detach()*0))
+        np_ = losses.get("num_pos", (stats.get("num_pos") if isinstance(stats, dict) else 0))
+        return {"loss": total, "loss_box": lb, "loss_cls": lc, "num_pos": float(np_)}
+
+    raise TypeError("criterion must return a Tensor or a dict of losses")
+
+def train_step(model, batch, device):
+    model.train()
     images, targets = batch
-    images = images.to (device, non_blocking = True)
+    images = images.to(device, non_blocking=True)
 
-    optimizer.zero_grad (set_to_none = True)
+    optimizer.zero_grad(set_to_none=True)
 
-    with torch.cuda.amp.autocast (enabled = CFG.get ("amp", True)):
-        out = model (images, targets)
-        loss = out ["loss"]
-        loss_box = out.get ("loss_box", 0.0)
-        loss_cls = out.get ("loss_cls", 0.0)
-        num_pos = out.get ("num_pos", 0.0)
+    # new autocast API
+    with torch.amp.autocast('cuda', enabled=CFG.get("amp", True)):
+        # forward once to get the head_out
+        head_out = model(images)
 
-        if not torch.is_tensor (loss_box):
-            loss_box = torch.as_tensor (loss_box, device = loss.device, dtype = loss.dtype)
-        if not torch.is_tensor (loss_cls):
-            loss_cls = torch.as_tensor (loss_cls, device = loss.device, dtype = loss.dtype)
-        if not torch.is_tensor (num_pos):
-            num_pos = torch.as_tensor (num_pos, device = loss.device, dtype = loss.dtype)
+        # compute loss
+        if not (hasattr(model, "criterion") and model.criterion is not None):
+            raise RuntimeError("model.criterion is not set; cannot compute training loss.")
+        losses, stats = model.criterion(head_out, targets)
+        loss_dict = _standardize_losses(losses, stats)
 
-    scaler.scale (loss).backward ()
+        total_loss = loss_dict["loss"]
+        loss_box   = loss_dict.get("loss_box", total_loss.detach()*0)
+        loss_cls   = loss_dict.get("loss_cls", total_loss.detach()*0)
+        num_pos    = loss_dict.get("num_pos", 0.0)
 
-    if CFG.get ("grad_clip_norm", None):
-        scaler.unscale_ (optimizer)
-        torch.nn.utils.clip_grad_norm_ (model.parameters (), CFG ["grad_clip_norm"])
+    # backward
+    scaler.scale(total_loss).backward()
 
-    scaler.step (optimizer)
-    scaler.update ()
+    # clip (guard unscale_ in case it's been called already by a previous failure)
+    if CFG.get("grad_clip_norm", None):
+        try:
+            scaler.unscale_(optimizer)
+        except RuntimeError as e:
+            if "already been called" not in str(e):
+                raise
+        torch.nn.utils.clip_grad_norm_(model.parameters(), CFG["grad_clip_norm"])
 
-    stats = {
-        "loss": float (loss.detach ().item ()),
-        "loss_box": float (loss_box.detach ().item ()),
-        "loss_cls": float (loss_cls.detach ().item ()),
-        "num_pos": float (num_pos.detach ().item ())
+    # step + update
+    scaler.step(optimizer)
+    scaler.update()
+
+    return {
+        "loss": float(total_loss.detach().item()),
+        "loss_box": float(loss_box.detach().item()) if torch.is_tensor(loss_box) else float(loss_box),
+        "loss_cls": float(loss_cls.detach().item()) if torch.is_tensor(loss_cls) else float(loss_cls),
+        "num_pos": float(num_pos),
     }
-    return stats
 
 #ema
 import copy
@@ -1560,7 +1543,7 @@ for epoch in range (3):
     scheduler.step ()
     print (f"epoch {epoch+1} done, avg loss = {sum (history) / len (history):.4f}, time = {time.time () - t0:.2f}s")
 
-#Stage 7
+Stage 7
 
 
 #loader builders
@@ -1589,10 +1572,22 @@ VAL_LBL_DIR = os.path.join (CFG ["data_root"], CFG ["val_lbl_dir"])
 val_ds, val_loader = build_loader (VAL_IMG_DIR, VAL_LBL_DIR, CFG, shuffle = False)
 print ("val size:", len (val_ds))
 
-#-----
 #coco mAP eval
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
+
+def undo_letterbox_to_original (xyxy, pad, scale, original_size):
+    px, py = pad
+    x1 = (xyxy [..., 0] - px) / scale
+    y1 = (xyxy [..., 1] - py) / scale
+    x2 = (xyxy [..., 2] - px) / scale
+    y2 = (xyxy [..., 3] - py) / scale
+    H, W = original_size
+    x1.clamp_ (0, W - 1)
+    x2.clamp_ (0, W - 1)
+    y1.clamp_ (0, H - 1)
+    y2.clamp_ (0, H - 1)
+    return torch.stack ([x1, y1, x2, y2], dim = 1)
 
 def _image_size_from_stem (stem):
     #try common image extensions
@@ -1617,7 +1612,7 @@ def evaluate_map_coco (model, val_loader, device, imgsz = 640, score_thresh = 0.
         lp = os.path.join (VAL_LBL_DIR, stem + ".txt")
 
         if os.path.exists (lp):
-            arr = val_loader.dataset._read_labels (lp)
+            arr = val_loader.dataset._read_label (lp)
             if arr.size:
                 boxes, cls = yolo_to_xyxy (arr, W, H)
                 for j , (x1, y1, x2, y2) in enumerate (boxes):
@@ -1640,38 +1635,27 @@ def evaluate_map_coco (model, val_loader, device, imgsz = 640, score_thresh = 0.
     model.eval ()
     for images, targets in val_loader:
         images = images.to (device, non_blocking = True)
-        outs = model_inference_step (
-            model,
-            images,
-            image_size = imgsz,
-            score_thresh = score_thresh,
-            iou_thresh = 0.7,
-            max_det = 300,
-        )
+        outs = model_inference_step (model, images, image_size = imgsz, score_thresh = score_thresh, iou_thresh = 0.7, max_det = 300)
 
-        for batch_index, det in enumerate (outs):
-            stem = targets ["image_id"][batch_index]
+        for b, det in enumerate (outs):
+            stem = targets ["image_id"]
             image_index = val_loader.dataset.stems.index (stem)
-            H, W = targets ["orig_size"][batch_index]
-            scale = targets ["scale"][batch_index]
-            pad = targets ["pad"][batch_index]
-
+            H, W = targets ["original_size"] [b]
+            scale = targets ["scale"][b]
+            pad = targets ["pad"][b]
             if det ["boxes"].numel () == 0:
                 continue
+            bx_original = undo_letterbox_to_original (det ["boxes"].clone (), pad, scale, (H, W))
+            sc = det ["scores"].tolist ()
+            cl = det ["classes"].tolist ()
 
-            boxes_original = undo_letterbox_to_orig (
-                det ["boxes"].clone (), pad, scale, (H, W)
-            )
-            scores = det ["scores"].tolist ()
-            classes = det ["classes"].tolist ()
-
-            for prediction_index in range (boxes_original.shape [0]):
-                x1, y1, x2, y2 = boxes_original [prediction_index].tolist ()
+            for k in range (bx_original.shape [0]):
+                x1, y1, x2, y2 = bx_original [k].tolist ()
                 dets_json.append ({
                     "image_id": image_index,
-                    "category_id": int (classes [prediction_index]),
+                    "category_id": int (cl [k]),
                     "bbox": [x1, y1, x2 - x1, y2 - y1],
-                    "score": float (scores [prediction_index]),
+                    "score": float (sc [k]),
                 })
 
     if len (dets_json):
@@ -1698,333 +1682,272 @@ def load_checkpoint (path, model, ema = None, optimizer = None, scheduler = None
         scheduler.load_state_dict (checkpoint ["scheduler"])
     print ("Loaded checkpoint:", path)
 
-# === cell7_train_with_viz: EMA + loaders + realtime viz + training + eval ===
-import os, copy, glob, math, json
-import numpy as np
-import torch
-from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
-from IPython.display import display, clear_output
 
-VIZ_EVERY = int(CFG.get("viz_every", 200))   # inline viz frequency (steps). Set 0 to disable
-VIZ_MAX_IMAGES = int(CFG.get("viz_max_images", 4))
-SAVE_EVERY_EPOCH = True                      # always save per-epoch ckpt
-EVAL_EVERY_EPOCH = True                      # run mAP eval each epoch (skips if pycocotools missing)
+# interactive mode
+plt.ion()
+fig_live, axs_live = plt.subplots(1, 2, figsize=(12, 6))
 
-# ---------- 1) EMA ----------
-class ModelEMA:
-    def __init__(self, model, decay=0.9998, device=None):
-        self.module = copy.deepcopy(model).eval()
-        for p in self.module.parameters():
-            p.requires_grad_(False)
-        self.decay = decay
-        if device:
-            self.module.to(device)
+def show_live_batch(model, batch, dataset, img_dir, lbl_dir, step, max_images=2):
+    for ax in axs_live:
+        ax.cla()  # clear axes
 
-    @torch.no_grad()
-    def update(self, model):
-        msd = model.state_dict()
-        esd = self.module.state_dict()
-        d = self.decay
-        for k in esd.keys():
-          if esd[k].dtype.is_floating_point:
-              esd[k].mul_(d).add_(msd[k].detach(), alpha=1.0 - d)
-          else:
-              esd[k].copy_(msd[k])
-
-# instantiate EMA
-ema = ModelEMA(model, decay=CFG.get("ema_decay", 0.9998), device=device)
-
-# ---------- 2) Dataloader builders (uses your YoloDataset, collate_fn, _wif) ----------
-def build_loader(img_dir, lbl_dir, cfg, shuffle):
-    ds = YoloDataset(
-        img_dir, lbl_dir,
-        imgsz=cfg["imgsz"], augment=shuffle,
-        pad_value=cfg["letterbox_pad"],
-        horizontal_flip_prob=(cfg.get("hflip_p", 0.5) if shuffle else 0.0),
-        hsv_hgain=cfg.get("hsv_h", 0.0),
-        hsv_sgain=cfg.get("hsv_s", 0.0),
-        hsv_vgain=cfg.get("hsv_v", 0.0),
-    )
-    dl = DataLoader(
-        ds, batch_size=cfg["batch_size"], shuffle=shuffle, num_workers=4,
-        collate_fn=collate_fn, pin_memory=torch.cuda.is_available(),
-        persistent_workers=False, worker_init_fn=_wif,
-        generator=torch.Generator().manual_seed(cfg["seed"]),
-    )
-    return ds, dl
-
-VAL_IMG_DIR = os.path.join(CFG["data_root"], CFG["val_img_dir"])
-VAL_LBL_DIR = os.path.join(CFG["data_root"], CFG["val_lbl_dir"])
-val_ds, val_loader = build_loader(VAL_IMG_DIR, VAL_LBL_DIR, CFG, shuffle=False)
-
-# ---------- 3) Letterbox undo + small helpers ----------
-def undo_letterbox_to_orig(xyxy, pad, scale, orig_size):
-    # xyxy in letterbox space -> original image coords
-    px, py = pad
-    x1 = (xyxy[:,0] - px) / scale
-    y1 = (xyxy[:,1] - py) / scale
-    x2 = (xyxy[:,2] - px) / scale
-    y2 = (xyxy[:,3] - py) / scale
-    H, W = orig_size
-    x1.clamp_(0, W-1); x2.clamp_(0, W-1)
-    y1.clamp_(0, H-1); y2.clamp_(0, H-1)
-    return torch.stack([x1,y1,x2,y2], dim=1)
-
-def _find_img_path(stem, img_dir):
-    for e in (".jpg",".jpeg",".png",".bmp",".JPG",".JPEG",".PNG",".BMP"):
-        p = os.path.join(img_dir, stem + e)
-        if os.path.exists(p):
-            return p
-    return None
-
-def _draw_boxes(ax, boxes, labels=None, scores=None, title=None):
-    ax.set_axis_off()
-    if title: ax.set_title(title, fontsize=10)
-    for i,(x1,y1,x2,y2) in enumerate(boxes):
-        rect = Rectangle((x1,y1), x2-x1, y2-y1, fill=False, linewidth=1.5)
-        ax.add_patch(rect)
-        tag = None
-        if labels is not None:
-            cid = int(labels[i])
-            if 0 <= cid < len(COCO_NAMES):
-                tag = COCO_NAMES[cid]
-            else:
-                tag = str(cid)
-        if scores is not None:
-            s = f"{scores[i]:.2f}"
-            tag = f"{tag} {s}" if tag else s
-        if tag:
-            ax.text(x1, max(0, y1-2), tag, fontsize=7,
-                    bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
-
-# ---------- 4) Live inline visualization (Pred LEFT vs GT RIGHT on ORIGINAL image) ----------
-def show_pred_vs_gt_inline(model, batch, dataset, img_dir, lbl_dir, max_images=4):
-    model.eval()
     images, targets = batch
     dev = next(model.parameters()).device
     images_dev = images.to(dev, non_blocking=True)
-
     outs = model_inference_step(model, images_dev, image_size=CFG["imgsz"],
-                                score_thresh=0.001, iou_thresh=0.7, max_det=200)
+                                score_thresh=0.001, iou_thresh=0.7, max_det=50)
 
-    B = images.shape[0]
-    nshow = min(B, max_images)
-
-    fig_w = 10
-    fig_h = max(6, nshow * 3)
-    fig, axes = plt.subplots(nshow, 2, figsize=(fig_w, fig_h), squeeze=False)
-
+    nshow = min(len(images), max_images)
     for i in range(nshow):
         stem = targets["image_id"][i]
-        H, W = targets["orig_size"][i]
-        scale = targets["scale"][i]
-        pad = targets["pad"][i]
-
-        # load original image
-        p = _find_img_path(stem, img_dir)
-        if p is None:
-            # fallback to letterboxed tensor
-            img_disp = (images[i].detach().cpu().float().clamp(0,1).permute(1,2,0).numpy()*255).astype(np.uint8)
+        H, W = targets["original_size"][i]
+        scale = targets["scale"][i]; pad = targets["pad"][i]
+        img_path = None
+        for e in (".jpg",".png",".jpeg",".JPG"):
+            p = os.path.join(img_dir, stem+e)
+            if os.path.exists(p): img_path = p; break
+        if img_path:
+            img_disp = dataset._read_image(img_path)
         else:
-            img_disp = dataset._read_image(p)
+            img_disp = (images[i].cpu().permute(1,2,0).numpy()*255).astype(np.uint8)
 
         # preds -> original coords
         if outs[i]["boxes"].numel() > 0:
-            pred_boxes_orig = undo_letterbox_to_orig(outs[i]["boxes"].detach().cpu(), pad, scale, (H, W)).numpy()
-            pred_scores = outs[i]["scores"].detach().cpu().numpy().tolist()
-            pred_classes = outs[i]["classes"].detach().cpu().numpy().tolist()
+            pred_boxes = undo_letterbox_to_original(outs[i]["boxes"].cpu(), pad, scale, (H,W)).numpy()
+            pred_cls   = outs[i]["classes"].cpu().numpy()
         else:
-            pred_boxes_orig = np.zeros((0,4), dtype=np.float32)
-            pred_scores, pred_classes = [], []
+            pred_boxes, pred_cls = [], []
 
-        # gt from txt
-        gt_boxes_orig = np.zeros((0,4), dtype=np.float32)
-        gt_classes = []
+        # gt boxes
+        gt_boxes = np.zeros((0,4)); gt_cls = []
         lblp = os.path.join(lbl_dir, stem + ".txt")
         if os.path.exists(lblp):
             arr = dataset._read_labels(lblp)
             if arr.size:
                 bxyxy, cls = yolo_to_xyxy(arr, W, H)
-                gt_boxes_orig = np.array(bxyxy, dtype=np.float32)
-                gt_classes = cls.astype(np.int32).tolist()
+                gt_boxes, gt_cls = np.array(bxyxy), cls.astype(int).tolist()
 
         # LEFT: preds
-        axL = axes[i,0]; axL.imshow(img_disp)
-        _draw_boxes(axL, pred_boxes_orig, labels=pred_classes, scores=pred_scores, title=f"{stem} — Pred")
+        axs_live[0].imshow(img_disp)
+        axs_live[0].set_title(f"Pred step {step}")
+        for j,(x1,y1,x2,y2) in enumerate(pred_boxes):
+            axs_live[0].add_patch(Rectangle((x1,y1), x2-x1, y2-y1, fill=False, edgecolor="lime", lw=1))
+            axs_live[0].text(x1, y1-2, str(int(pred_cls[j])), fontsize=6, color="lime")
+        axs_live[0].axis("off")
+
         # RIGHT: GT
-        axR = axes[i,1]; axR.imshow(img_disp)
-        _draw_boxes(axR, gt_boxes_orig, labels=gt_classes, scores=None, title=f"{stem} — GT")
+        axs_live[1].imshow(img_disp)
+        axs_live[1].set_title("Ground Truth")
+        for j,(x1,y1,x2,y2) in enumerate(gt_boxes):
+            axs_live[1].add_patch(Rectangle((x1,y1), x2-x1, y2-y1, fill=False, edgecolor="red", lw=1))
+            axs_live[1].text(x1, y1-2, str(gt_cls[j]), fontsize=6, color="red")
+        axs_live[1].axis("off")
 
-    plt.tight_layout()
-    clear_output(wait=True)
-    display(fig)
-    plt.close(fig)
+    fig_live.suptitle(f"Step {step}")
+    fig_live.canvas.draw()
+    fig_live.canvas.flush_events()
+    plt.pause(0.001)
 
-# ---------- 5) (Optional) COCO mAP evaluation (skips gracefully if pycocotools missing) ----------
-def evaluate_map_coco_safe(model, val_loader, device):
-    try:
-        from pycocotools.coco import COCO
-        from pycocotools.cocoeval import COCOeval
-    except Exception as e:
-        print("[EVAL] pycocotools not available, skipping mAP eval.")
-        return None
 
-    categories = [{"id": i, "name": n} for i, n in enumerate(COCO_NAMES)]
-    coco_gt = {"images": [], "annotations": [], "categories": categories}
-    ann_id = 1
-    for idx, stem in enumerate(val_loader.dataset.stems):
-        im_path = _find_img_path(stem, VAL_IMG_DIR)
-        if im_path is None:
-            continue
-        im = val_loader.dataset._read_image(im_path)
-        H, W = im.shape[:2]
-        coco_gt["images"].append({"id": idx, "file_name": stem, "height": H, "width": W})
-        lp = os.path.join(VAL_LBL_DIR, stem + ".txt")
+# ===== Stage 8: TRAIN LOOP with live viz & checkpoints =====
+import os, time, math, json, torch
+from collections import defaultdict
+from datetime import datetime
+
+# --- knobs you can tweak quickly ---
+EPOCHS          = min(3, CFG["epochs"])    # keep small first; bump later
+LOG_EVERY       = 20                       # iterations
+VIZ_EVERY       = 5  # show preds vs GT this often
+VAL_EVERY_EPOCH = 1                        # run a tiny val sweep each epoch
+SAVE_EVERY_EPOCH= 1                        # save checkpoint each epoch
+MAX_TRAIN_STEPS = None                     # optional hard cap on steps per epoch (int or None)
+
+# **Tip for speed**: earlier you set TARGET=2000 in the FO chunk.
+# Drop it to e.g. 256 or 512 before staging to avoid long first epochs.
+
+# --- ensure we have train/val loaders (if user re-ran out of order) ---
+if train_loader is None:
+    # Fallback: try to build train loader from dirs
+    TRAIN_IMG_DIR = os.path.join(CFG["data_root"], CFG["train_img_dir"])
+    TRAIN_LBL_DIR = os.path.join(CFG["data_root"], CFG["train_lbl_dir"])
+    if not os.path.isdir(TRAIN_IMG_DIR) or not os.path.isdir(TRAIN_LBL_DIR):
+        raise RuntimeError("Train data dirs not found; run staging cells first.")
+    train_ds = YoloDataset(
+        TRAIN_IMG_DIR, TRAIN_LBL_DIR, imgsz=CFG["imgsz"], augment=True,
+        pad_value=CFG["letterbox_pad"], horizontal_flip_prob=CFG["hflip_p"],
+        hsv_hgain=CFG["hsv_h"], hsv_sgain=CFG["hsv_s"], hsv_vgain=CFG["hsv_v"]
+    )
+    train_loader = DataLoader(
+        train_ds, batch_size=CFG["batch_size"], shuffle=True, num_workers=2,
+        collate_fn=collate_fn, pin_memory=torch.cuda.is_available(),
+        persistent_workers=False, worker_init_fn=_wif,
+        generator=torch.Generator().manual_seed(CFG["seed"]),
+    )
+
+# --- small util: fix name mismatch used in earlier helper ---
+def undo_letterbox_to_original(xyxy, pad, scale, original_size):
+    # same as your earlier function name; provided here so live viz doesn't break
+    px, py = pad
+    x1 = (xyxy[..., 0] - px) / scale
+    y1 = (xyxy[..., 1] - py) / scale
+    x2 = (xyxy[..., 2] - px) / scale
+    y2 = (xyxy[..., 3] - py) / scale
+    H, W = original_size
+    x1.clamp_(0, W - 1); x2.clamp_(0, W - 1)
+    y1.clamp_(0, H - 1); y2.clamp_(0, H - 1)
+    return torch.stack([x1, y1, x2, y2], dim=1)
+
+# --- live viz (fixed to use the function above) ---
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+
+plt.ion()
+_fig, _axs = plt.subplots(1, 2, figsize=(12, 6))
+
+def show_live_batch(model, batch, dataset, img_dir, lbl_dir, step, max_images=2):
+    for ax in _axs: ax.cla()
+
+    images, targets = batch
+    dev = next(model.parameters()).device
+    images_dev = images.to(dev, non_blocking=True)
+    outs = model_inference_step(
+        model, images_dev, image_size=CFG["imgsz"], score_thresh=0.001, iou_thresh=0.7, max_det=50
+    )
+
+    nshow = min(len(images), max_images)
+    for i in range(nshow):
+        stem = targets["image_id"][i]
+        H, W = targets["orig_size"][i]
+        scale = targets["scale"][i]; pad = targets["pad"][i]
+
+        # try to fetch the original image for prettier display
+        img_path = None
+        for e in (".jpg",".jpeg",".png",".bmp",".JPG",".JPEG",".PNG",".BMP"):
+            p = os.path.join(img_dir, stem + e)
+            if os.path.exists(p): img_path = p; break
+        if img_path:
+            img_disp = dataset._read_image(img_path)
+        else:
+            img_disp = (images[i].cpu().permute(1,2,0).numpy()*255).astype("uint8")
+
+        # predictions -> original coords
+        if outs[i]["boxes"].numel() > 0:
+            pred_boxes = undo_letterbox_to_original(outs[i]["boxes"].cpu(), pad, scale, (H, W)).numpy()
+            pred_cls   = outs[i]["classes"].cpu().numpy()
+        else:
+            pred_boxes, pred_cls = [], []
+
+        # ground truth
+        gt_boxes = []
+        gt_cls   = []
+        lp = os.path.join(lbl_dir, stem + ".txt")
         if os.path.exists(lp):
-            arr = val_loader.dataset._read_labels(lp)
+            arr = dataset._read_labels(lp)
             if arr.size:
-                boxes, cls = yolo_to_xyxy(arr, W, H)
-                for j,(x1,y1,x2,y2) in enumerate(boxes):
-                    coco_gt["annotations"].append({
-                        "id": ann_id, "image_id": idx, "category_id": int(cls[j]),
-                        "bbox": [float(x1), float(y1), float(x2-x1), float(y2-y1)],
-                        "area": float(max(0.0, (x2-x1))*max(0.0, (y2-y1))),
-                        "iscrowd": 0
-                    })
-                    ann_id += 1
-    from pycocotools.coco import COCO
-    from pycocotools.cocoeval import COCOeval
-    cocoGt = COCO()
-    cocoGt.dataset = coco_gt
-    cocoGt.createIndex()
+                bxyxy, cls = yolo_to_xyxy(arr, W, H)
+                gt_boxes, gt_cls = bxyxy, cls.astype(int).tolist()
 
-    dets_json = []
+        # LEFT: predictions
+        _axs[0].imshow(img_disp)
+        _axs[0].set_title(f"Predictions @ step {step}")
+        for j,(x1,y1,x2,y2) in enumerate(pred_boxes):
+            _axs[0].add_patch(Rectangle((x1,y1), x2-x1, y2-y1, fill=False, edgecolor="lime", lw=1))
+            _axs[0].text(x1, max(0,y1-3), str(int(pred_cls[j])), fontsize=7, color="lime")
+        _axs[0].axis("off")
+
+        # RIGHT: ground truth
+        _axs[1].imshow(img_disp)
+        _axs[1].set_title("Ground Truth")
+        for j,(x1,y1,x2,y2) in enumerate(gt_boxes):
+            _axs[1].add_patch(Rectangle((x1,y1), x2-x1, y2-y1, fill=False, edgecolor="red", lw=1))
+            _axs[1].text(x1, max(0,y1-3), str(gt_cls[j]), fontsize=7, color="red")
+        _axs[1].axis("off")
+
+    _fig.suptitle(f"Step {step}")
+    _fig.canvas.draw()
+    _fig.canvas.flush_events()
+    plt.pause(0.001)
+
+# --- checkpoint helpers ---
+def save_checkpoint(epoch, model, ema, optimizer, scheduler, run_dir):
+    ckpt = {
+        "epoch": epoch,
+        "model": model.state_dict(),
+        "ema":   ema.module.state_dict() if ema is not None else None,
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "cfg": CFG,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+    path = os.path.join(run_dir, f"ckpt_e{epoch:03d}.pt")
+    torch.save(ckpt, path)
+    print(f"💾 Saved checkpoint -> {path}")
+    return path
+
+# --- train/val loops ---
+def validate_brief(model, val_loader, device):
     model.eval()
-    for images, targets in val_loader:
-        images = images.to(device, non_blocking=True)
-        outs = model_inference_step(model, images, image_size=CFG["imgsz"],
-                                    score_thresh=0.001, iou_thresh=0.7, max_det=300)
-        for b, det in enumerate(outs):
-            stem = targets["image_id"][b]
-            try:
-                img_idx = val_loader.dataset.stems.index(stem)
-            except:
-                continue
-            H, W = targets["orig_size"][b]
-            scale = targets["scale"][b]; pad = targets["pad"][b]
-            if det["boxes"].numel() == 0:
-                continue
-            bx = undo_letterbox_to_orig(det["boxes"].detach().cpu(), pad, scale, (H, W)).numpy()
-            sc = det["scores"].detach().cpu().numpy().tolist()
-            cl = det["classes"].detach().cpu().numpy().tolist()
-            for k in range(bx.shape[0]):
-                x1,y1,x2,y2 = bx[k].tolist()
-                dets_json.append({
-                    "image_id": img_idx,
-                    "category_id": int(cl[k]),
-                    "bbox": [x1, y1, x2-x1, y2-y1],
-                    "score": float(sc[k]),
-                })
+    total = 0.0
+    nimg  = 0
+    with torch.no_grad():
+        for images, targets in val_loader:
+            images = images.to(device, non_blocking=True)
+            outs = model_inference_step(model, images, image_size=CFG["imgsz"], score_thresh=0.001, iou_thresh=0.7)
+            total += sum(d["boxes"].shape[0] for d in outs)
+            nimg  += images.shape[0]
+            if nimg >= 64:  # keep it brief
+                break
+    return float(total) / max(1, nimg)
 
-    cocoDt = cocoGt.loadRes(dets_json) if len(dets_json) else cocoGt.loadRes([])
-    cocoEval = COCOeval(cocoGt, cocoDt, iouType="bbox")
-    cocoEval.params.useCats = 1
-    cocoEval.evaluate(); cocoEval.accumulate(); cocoEval.summarize()
-    return float(cocoEval.stats[0]) if cocoEval.stats is not None else None
-
+print(f"▶️ Starting training for {EPOCHS} epochs on device {device} ...")
 global_step = 0
+loss_ema = None
 
-def one_epoch(model, loader, device, log_every=50):
-    global global_step
-    model.train()
-    meters = {"loss":0.0, "loss_box":0.0, "loss_cls":0.0, "num_pos":0, "n":0}
+try:
+    for epoch in range(1, EPOCHS+1):
+        model.train()
+        t0 = time.time()
+        for it, batch in enumerate(train_loader):
+            # optional step cap per epoch to keep things snappy
+            if MAX_TRAIN_STEPS is not None and it >= MAX_TRAIN_STEPS:
+                break
 
-    steps = len(loader)
-    warmup_epochs = int(CFG.get("warmup_epochs", 0))
-    for it, batch in enumerate(loader):
-        stats = train_step(model, batch, device)
-        ema.update(model)
-        global_step += 1
+            stats = train_step(model, batch, device)
+            ema.update(model)
 
-        # inline viz
-        if VIZ_EVERY and ((it + 1) % VIZ_EVERY == 0):
-            # show predictions vs GT from the *current batch*
-            show_pred_vs_gt_inline(ema.module, (batch[0].cpu(), batch[1]), loader.dataset,
-                                   TRAIN_IMG_DIR, TRAIN_LBL_DIR, max_images=VIZ_MAX_IMAGES)
+            # running loss (EMA)
+            loss_ema = stats["loss"] if loss_ema is None else (0.9*loss_ema + 0.1*stats["loss"])
+            global_step += 1
 
-        for k in ("loss","loss_box","loss_cls","num_pos"):
-            meters[k] += stats[k]
-        meters["n"] += 1
-        if (it+1) % log_every == 0:
-            n = meters["n"]
-            print(f'   it {it+1:>4}/{steps} | loss {meters["loss"]/n:.4f}  '
-                  f'box {meters["loss_box"]/n:.4f}  cls {meters["loss_cls"]/n:.4f}  '
-                  f'pos {meters["num_pos"]/n:.1f}')
+            # logs
+            if (it+1) % LOG_EVERY == 0:
+                print(f"epoch {epoch:02d} it {it+1:04d} | "
+                      f"loss {stats['loss']:.4f} (ema {loss_ema:.4f}) | "
+                      f"box {stats['loss_box']:.4f} cls {stats['loss_cls']:.4f} | "
+                      f"pos {stats['num_pos']:.1f} | "
+                      f"{time.time()-t0:.1f}s")
 
-    n = max(1, meters["n"])
-    return {k:(meters[k]/n) for k in meters if k!="n"}
+            # live viz
+            if VIZ_EVERY and (global_step % VIZ_EVERY == 0):
+                # Show current batch predictions vs GT
+                show_live_batch(ema.module, batch, train_ds, TRAIN_IMG_DIR, TRAIN_LBL_DIR, global_step, max_images=2)
 
-# ---------- 7) Main training loop (chunk → train → dispose → eval → save) ----------
-best_map = -1.0
-os.makedirs(DIRS["checkpoints"], exist_ok=True)
+        # sched step per-epoch
+        scheduler.step()
 
-for epoch in range(CFG["epochs"]):
-    print(f"\n=== EPOCH {epoch+1}/{CFG['epochs']} ===")
+        # tiny val
+        if (epoch % VAL_EVERY_EPOCH) == 0:
+            val_proxy = validate_brief(ema.module, val_loader, device)
+            print(f"🔎 epoch {epoch:02d} brief-val proxy (#dets/img) = {val_proxy:.2f}")
 
-    # Ensure a train chunk is staged
-    if _count_imgs(TRAIN_IMG_DIR) == 0:
-        stage_train_chunk()
+        # save
+        if (epoch % SAVE_EVERY_EPOCH) == 0:
+            save_checkpoint(epoch, model, ema, optimizer, scheduler, RUN_DIR)
 
-    # Build train loader fresh each epoch (new chunk)
-    train_ds, train_loader = build_loader(TRAIN_IMG_DIR, TRAIN_LBL_DIR, CFG, shuffle=True)
+    print("✅ Training loop finished.")
 
-    # light LR warmup across first few epochs
-    if epoch < CFG.get("warmup_epochs", 0):
-        for g in optimizer.param_groups:
-            g["lr"] = CFG["lr"] * (epoch + 1) / max(1, CFG["warmup_epochs"])
-
-    stats = one_epoch(model, train_loader, device)
-    # step epoch scheduler (if you're using epoch-level Cosine)
-    if 'scheduler' in globals() and scheduler is not None:
-        try:
-            scheduler.step()
-        except Exception as e:
-            pass
-
-    # rotate chunk to keep disk usage low
-    dispose_current_chunk(delete_from_cache=True, mark_seen=True)
-
-    # Evaluate (mAP)
-    map5095 = None
-    if EVAL_EVERY_EPOCH:
-        map5095 = evaluate_map_coco_safe(ema.module, val_loader, device)
-        if map5095 is not None:
-            print(f"[EVAL] mAP50-95: {map5095:.4f}")
-
-    # Save ckpts
-    ckpt_base = os.path.join(DIRS["checkpoints"], f"{RUN_NAME}_e{epoch+1:03d}.pt")
-    if SAVE_EVERY_EPOCH:
-        torch.save({
-            "model": model.state_dict(),
-            "ema": ema.module.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": (scheduler.state_dict() if ('scheduler' in globals() and scheduler is not None) else None),
-            "cfg": CFG
-        }, ckpt_base)
-        print("Saved:", ckpt_base)
-
-    if map5095 is not None and map5095 > best_map:
-        best_map = map5095
-        best_path = os.path.join(DIRS["checkpoints"], f"{RUN_NAME}_best.pt")
-        torch.save({
-            "model": model.state_dict(),
-            "ema": ema.module.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": (scheduler.state_dict() if ('scheduler' in globals() and scheduler is not None) else None),
-            "cfg": CFG
-        }, best_path)
-        print("↑ Saved BEST:", best_path)
-
-print("\nTraining loop finished.")
+except KeyboardInterrupt:
+    print("\n⛔ Interrupted. Saving emergency checkpoint...")
+    save_checkpoint(epoch, model, ema, optimizer, scheduler, RUN_DIR)
