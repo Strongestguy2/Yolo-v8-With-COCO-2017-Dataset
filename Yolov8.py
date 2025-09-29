@@ -189,14 +189,14 @@ SEEN_TXT = os.path.join (DIRS ["datasets"], "seen_filepaths.txt")
 CURR_CHUNK_TXT = os.path.join (DIRS ["datasets"], "current_chunk_paths.txt")
 
 def _load_seen ():
-    if not os.path.exists (SEEN_TXT): 
+    if not os.path.exists (SEEN_TXT):
         return set ()
     with open (SEEN_TXT, "r") as f:
         return set (l.strip () for l in f if l.strip ())
 
 def _save_current_chunk (paths):
     with open (CURR_CHUNK_TXT, "w") as f:
-        for p in paths: 
+        for p in paths:
             f.write (p + "\n")
 
 def get_chunk_by_index (ds, split = "train", k = 2000, chunk_index = 0):
@@ -206,7 +206,7 @@ def get_chunk_by_index (ds, split = "train", k = 2000, chunk_index = 0):
 def _append_seen (paths):
     seen = _load_seen ().union (paths)
     with open (SEEN_TXT, "w") as f:
-        for p in sorted (seen): 
+        for p in sorted (seen):
             f.write (p + "\n")
 
 def get_next_unseen_chunk (ds, split = "train", k = 2000):
@@ -214,12 +214,12 @@ def get_next_unseen_chunk (ds, split = "train", k = 2000):
     base = ds.match_tags (split).sort_by ("filepath")
     ids = []
     paths = []
-    
+
     for s in base:
         if s.filepath not in seen:
             ids.append (s.id)
             paths.append (s.filepath)
-            if len (ids) >= k: 
+            if len (ids) >= k:
                 break
     if not ids:
         print (f"No unseen samples left in {split}")
@@ -268,35 +268,68 @@ def _clean_dir (pat_list):
             try: os.remove(p)
             except: pass
 
-def symlink_and_write_labels (sample_collection, split: str):
-    field = detections_field (sample_collection._dataset)
+def symlink_and_write_labels(sample_collection, split: str):
+    import numpy as np
+    field = detections_field(sample_collection._dataset)
 
-    if split == "train":
-        img_dir = IMG_TRAIN
-        lbl_dir = LBL_TRAIN
-    else:
-        img_dir = IMG_VAL
-        lbl_dir = LBL_VAL
+    img_dir = IMG_TRAIN if split == "train" else IMG_VAL
+    lbl_dir = LBL_TRAIN if split == "train" else LBL_VAL
 
-    _clean_dir ([os.path.join (img_dir, "*"), os.path.join (lbl_dir, "*.txt")])
+    _clean_dir([os.path.join(img_dir, "*"), os.path.join(lbl_dir, "*.txt")])
 
-    wrote = 0
-    bad_boxes = 0
-    paths_this_chunk = []
-
+    wrote, bad_boxes = 0, 0
     for s in sample_collection:
         src  = s.filepath
-        stem = Path (src).stem
-        ext  = Path (src).suffix.lower()
-        dst_img = os.path.join (img_dir, f"{split}__{stem}{ext}")
-        if not os.path.exists (dst_img):
-            os.symlink (src, dst_img)
+        stem = Path(src).stem
+        ext  = Path(src).suffix.lower()
+        dst_stem = f"{split}__{stem}"
+        dst_img  = os.path.join(img_dir, f"{dst_stem}{ext}")
+        dst_lbl  = os.path.join(lbl_dir, f"{dst_stem}.txt")
+
+        if not os.path.exists(dst_img):
+            os.symlink(src, dst_img)
+
+        # pull detections from FiftyOne sample
+        dets = getattr(s, field, None)
+        H = s.metadata.height if s.metadata is not None else None
+        W = s.metadata.width  if s.metadata is not None else None
+
+        lines = []
+        if dets is not None and getattr(dets, "detections", None) and H and W:
+            for d in dets.detections:
+                cname = d.label
+                if cname not in name_to_idx:
+                    continue
+                cls_id = name_to_idx[cname]
+                # FO COCO boxes are normalized [x, y, w, h] in [0,1]
+                x, y, w, h = d.bounding_box
+                cx = x + w/2
+                cy = y + h/2
+
+                # clip just in case
+                cx = float(np.clip(cx, 0.0, 1.0))
+                cy = float(np.clip(cy, 0.0, 1.0))
+                w  = float(np.clip(w,  0.0, 1.0))
+                h  = float(np.clip(h,  0.0, 1.0))
+                if w <= 0 or h <= 0:
+                    bad_boxes += 1
+                    continue
+                lines.append(f"{cls_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
+
+        # write label file (empty file is valid: no objects)
+        with open(dst_lbl, "w") as f:
+            f.write("\n".join(lines))
+        wrote += 1
+
+    print(f"[EXPORT] {split}: wrote {wrote} label files; skipped {bad_boxes} invalid boxes")
+
 
 def stage_train_chunk ():
-    seen = _load_seen ()
-    view = load_next_train_chunk (seen)
-    symlink_and_write_labels (view, "train")
-    print ("staged ~2000 training samples.")
+
+  seen = _load_seen ()
+  view = load_next_train_chunk (seen)
+  symlink_and_write_labels (view, "train")
+  print ("staged ~2000 training samples.")
 
 def stage_val_once ():
 
@@ -327,7 +360,7 @@ def _reset_working_set ():
 def _safe_remove_media (paths, root = FO_CACHE_DIR):
     deleted = missing = skipped = 0
     root_abs = os.path.abspath (root) + os.sep
-    
+
     for p in paths:
         ap = os.path.abspath (p)
         if not ap.startswith (root_abs):
@@ -473,10 +506,10 @@ class YoloDataset (Dataset):
 
         self.image_paths = image_paths
         if len(self.image_paths) == 0:
-            raise FileNotFoundError(f"No images found in {image_dir} matching {patterns}")
+            raise FileNotFoundError (f"No images found in {image_dir} matching {patterns}")
 
-        self.stems = [Path(p).stem for p in self.image_paths]
-        self.label_paths = [os.path.join(label_dir, s + ".txt") for s in self.stems]
+        self.stems = [Path (p).stem for p in self.image_paths]
+        self.label_paths = [os.path.join (label_dir, s + ".txt") for s in self.stems]
 
     def __len__ (self):
         return len (self.image_paths)
@@ -507,7 +540,7 @@ class YoloDataset (Dataset):
       arr = np.asarray (out, dtype = np.float32)
 
       if arr.size:
-          arr [:, 1 : 5] = np.clip (arr[:, 1 : 5], 0.0, 1.0)
+          arr [:, 1 : 5] = np.clip (arr [:, 1 : 5], 0.0, 1.0)
       return arr
 
     def __getitem__ (self, index):
@@ -517,7 +550,7 @@ class YoloDataset (Dataset):
 
         image = self._read_image (image_path)
         H, W = image.shape [:2]
-        labels = self._read_labels (label_path) #[N, 5] (cls, cx, cy, w, h) normalized
+        labels = self._read_labels (label_path)
 
         if self.augment:
             image = augment_hsv (image, self.hsv_hgain, self.hsv_sgain, self.hsv_vgain)
@@ -554,7 +587,6 @@ class YoloDataset (Dataset):
         return image, target
 
 #colate function and dataloaders
-import os
 def collate_fn (batch):
     images, targets = list (zip (*batch))
     B = len (images)
@@ -602,39 +634,38 @@ def collate_fn (batch):
 
 def _wif (worker_id):
   seed = CFG ["seed"] + worker_id
-  random.seed(seed)
-  torch.manual_seed(seed)
+  random.seed (seed)
+  torch.manual_seed (seed)
   np.random.seed (seed)
 
 VAL_IMG_DIR = os.path.join (CFG ["data_root"], CFG ["val_img_dir"])
 VAL_LBL_DIR = os.path.join (CFG ["data_root"], CFG ["val_lbl_dir"])
+
 def _count_imgs(p):
     exts = ("*.jpg","*.jpeg","*.png","*.bmp","*.JPG","*.JPEG","*.PNG","*.BMP")
-    import glob, os
-    return sum(len(glob.glob(os.path.join(p, e))) for e in exts)
+    return sum (len (glob.glob (os.path.join (p, e))) for e in exts)
 
-if _count_imgs(VAL_IMG_DIR) == 0:
-    print("[VAL] No images detected under", VAL_IMG_DIR, "→ staging now...")
-    # in case user ran cells out of order, try staging once here too:
+if _count_imgs (VAL_IMG_DIR) == 0:
+    print ("[VAL] No images detected under", VAL_IMG_DIR, "→ staging now...")
     try:
-        stage_val_once()
+        stage_val_once ()
     except NameError:
-        print("[VAL] stage_val_once() not defined yet — run the FO cell first.")
+        print ("[VAL] stage_val_once() not defined yet — run the FO cell first.")
         raise
 
-val_ds = YoloDataset(
+val_ds = YoloDataset (
     VAL_IMG_DIR, VAL_LBL_DIR,
-    imgsz=CFG["imgsz"], augment=False,
-    pad_value=CFG["letterbox_pad"], horizontal_flip_prob=0.0
+    imgsz = CFG["imgsz"], augment = False,
+    pad_value = CFG ["letterbox_pad"], horizontal_flip_prob = 0.0
 )
-val_loader = DataLoader(
-    val_ds, batch_size=8, shuffle=False, num_workers=4,
-    collate_fn=collate_fn, pin_memory=torch.cuda.is_available(),
-    persistent_workers=False,
-    worker_init_fn=_wif,
-    generator=torch.Generator().manual_seed(CFG["seed"]),
+val_loader = DataLoader (
+    val_ds, batch_size = 8, shuffle = False, num_workers = 4,
+    collate_fn = collate_fn, pin_memory = torch.cuda.is_available (),
+    persistent_workers = False,
+    worker_init_fn = _wif,
+    generator = torch.Generator ().manual_seed (CFG ["seed"]),
 )
-print("val dataset:", len(val_ds))
+print ("val dataset:", len (val_ds))
 
 TRAIN_IMG_DIR = os.path.join (CFG ["data_root"], CFG ["train_img_dir"])
 TRAIN_LBL_DIR = os.path.join (CFG ["data_root"], CFG ["train_lbl_dir"])
@@ -644,197 +675,186 @@ if os.path.isdir (TRAIN_IMG_DIR) and os.path.isdir (TRAIN_LBL_DIR):
   def _count_imgs(p):
       exts = ("*.jpg","*.jpeg","*.png","*.bmp","*.JPG","*.JPEG","*.PNG","*.BMP")
       import glob, os
-      return sum(len(glob.glob(os.path.join(p, e))) for e in exts)
+      return sum (len (glob.glob (os.path.join (p, e))) for e in exts)
 
-  if _count_imgs(TRAIN_IMG_DIR) == 0:
-      print("[TRAIN] No images detected under", TRAIN_IMG_DIR, "→ staging chunk now...")
+  if _count_imgs (TRAIN_IMG_DIR) == 0:
+      print ("[TRAIN] No images detected under", TRAIN_IMG_DIR, "→ staging chunk now...")
       try:
-          stage_train_chunk()
+          stage_train_chunk ()
       except NameError:
-          print("[TRAIN] stage_train_chunk() not defined yet — run FO cell first.")
+          print ("[TRAIN] stage_train_chunk() not defined yet — run FO cell first.")
           raise
 
-  train_ds = YoloDataset(
+  train_ds = YoloDataset (
       TRAIN_IMG_DIR, TRAIN_LBL_DIR,
-      imgsz=CFG["imgsz"], augment=True,
-      pad_value=CFG["letterbox_pad"], horizontal_flip_prob=CFG["hflip_p"],
-      hsv_hgain=CFG["hsv_h"], hsv_sgain=CFG["hsv_s"], hsv_vgain=CFG["hsv_v"]
+      imgsz = CFG ["imgsz"], augment = True,
+      pad_value = CFG ["letterbox_pad"], horizontal_flip_prob = CFG ["hflip_p"],
+      hsv_hgain = CFG ["hsv_h"], hsv_sgain = CFG ["hsv_s"], hsv_vgain = CFG ["hsv_v"]
   )
   train_loader = DataLoader(
-      train_ds, batch_size=CFG["batch_size"], shuffle=True, num_workers=4,
-      collate_fn=collate_fn, pin_memory=torch.cuda.is_available(),
-      persistent_workers=False,
-      worker_init_fn=_wif,
-      generator=torch.Generator().manual_seed(CFG["seed"]),
+      train_ds, batch_size = CFG ["batch_size"], shuffle = True, num_workers = 4,
+      collate_fn = collate_fn, pin_memory = torch.cuda.is_available (),
+      persistent_workers = False,
+      worker_init_fn = _wif,
+      generator = torch.Generator ().manual_seed (CFG ["seed"]),
   )
 
-  xb, tb = next(iter(train_loader))
-  print("Train batch:", xb.shape, xb.dtype)
-  print("Targets keys:", list(tb.keys()))
+  xb, tb = next (iter (train_loader))
+  print ("Train batch:", xb.shape, xb.dtype)
+  print ("Targets keys:", list (tb.keys ()))
 else:
     train_loader = None
     print ("no training, train dataset not found")
 
-# ==== SANITY CHECK CELL ====
+#sanity check
 # Verifies: staging, label pairing, dataloader shapes, letterbox coords, and cache bookkeeping.
-
 import os, glob, random, math
 import numpy as np
 import cv2
 import torch
 import matplotlib.pyplot as plt
 
-# --- paths from earlier cells (assumes you've defined these) ---
-print("FO_CACHE_DIR:", FO_CACHE_DIR)
-print("ROOT:", ROOT)
-print("IMG_TRAIN:", IMG_TRAIN)
-print("LBL_TRAIN:", LBL_TRAIN)
-print("IMG_VAL:", IMG_VAL)
-print("LBL_VAL:", LBL_VAL)
-print("CURR_CHUNK_TXT:", CURR_CHUNK_TXT)
-print("SEEN_TXT:", SEEN_TXT)
+print ("FO_CACHE_DIR:", FO_CACHE_DIR)
+print ("ROOT:", ROOT)
+print ("IMG_TRAIN:", IMG_TRAIN)
+print ("LBL_TRAIN:", LBL_TRAIN)
+print ("IMG_VAL:", IMG_VAL)
+print ("LBL_VAL:", LBL_VAL)
+print ("CURR_CHUNK_TXT:", CURR_CHUNK_TXT)
+print ("SEEN_TXT:", SEEN_TXT)
 
-# 1) Basic file inventory
-def count_files(dir_, exts=(".jpg",".jpeg",".png",".bmp",".JPG",".JPEG",".PNG",".BMP")):
+def count_files(dir_, exts = (".jpg",".jpeg",".png",".bmp",".JPG",".JPEG",".PNG",".BMP")):
     n = 0
     for e in exts:
-        n += len(glob.glob(os.path.join(dir_, e)))
+        n += len (glob.glob (os.path.join (dir_, e)))
     return n
 
-n_tr_img = count_files(IMG_TRAIN)
-n_tr_lbl = len(glob.glob(os.path.join(LBL_TRAIN, "*.txt")))
-n_va_img = count_files(IMG_VAL)
-n_va_lbl = len(glob.glob(os.path.join(LBL_VAL, "*.txt")))
+n_tr_img = count_files (IMG_TRAIN)
+n_tr_lbl = len (glob.glob (os.path.join (LBL_TRAIN, "*.txt")))
+n_va_img = count_files (IMG_VAL)
+n_va_lbl = len (glob.glob (os.path.join (LBL_VAL, "*.txt")))
 
-print(f"[STAGED] train: {n_tr_img} images, {n_tr_lbl} labels")
-print(f"[STAGED]   val: {n_va_img} images, {n_va_lbl} labels")
+print (f"[STAGED] train: {n_tr_img} images, {n_tr_lbl} labels")
+print (f"[STAGED]   val: {n_va_img} images, {n_va_lbl} labels")
 
-# 2) Check label<->image stems & YOLO label range
-def stems(dir_imgs):
+def stems (dir_imgs):
     exts = ("*.jpg","*.jpeg","*.png","*.bmp","*.JPG","*.JPEG","*.PNG","*.BMP")
-    P=[]
+    P = []
     for e in exts:
-        P += glob.glob(os.path.join(dir_imgs, e))
-    return sorted([os.path.splitext(os.path.basename(p))[0] for p in P])
+        P += glob.glob (os.path.join (dir_imgs, e))
+    return sorted ([os.path.splitext (os.path.basename (p))[0] for p in P])
 
-def bad_yolo_lines(lbl_path):
+def bad_yolo_lines (lbl_path):
     bad = 0
-    with open(lbl_path, "r") as f:
+    with open (lbl_path, "r") as f:
         for line in f:
-            line=line.strip()
+            line = line.strip ()
             if not line:
                 continue
-            parts=line.split()
-            if len(parts)!=5:
-                bad+=1; continue
+            parts = line.split ()
+            if len (parts) != 5:
+                bad += 1; continue
             try:
                 cls,cx,cy,w,h = parts
-                cx,cy,w,h = map(float,(cx,cy,w,h))
+                cx, cy, w, h = map (float, (cx, cy, w, h))
                 if not (0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0 and 0.0 <= w <= 1.0 and 0.0 <= h <= 1.0):
                     bad += 1
             except:
                 bad += 1
     return bad
 
-tr_stems = stems(IMG_TRAIN)
-va_stems = stems(IMG_VAL)
+tr_stems = stems (IMG_TRAIN)
+va_stems = stems (IMG_VAL)
 
-missing_train_lbl = [s for s in tr_stems if not os.path.exists(os.path.join(LBL_TRAIN, s + ".txt"))]
-missing_val_lbl   = [s for s in va_stems if not os.path.exists(os.path.join(LBL_VAL,   s + ".txt"))]
+missing_train_lbl = [s for s in tr_stems if not os.path.exists (os.path.join (LBL_TRAIN, s + ".txt"))]
+missing_val_lbl   = [s for s in va_stems if not os.path.exists (os.path.join (LBL_VAL,   s + ".txt"))]
 
-print(f"[CHECK] missing train labels: {len(missing_train_lbl)}")
-print(f"[CHECK] missing val   labels: {len(missing_val_lbl)}")
+print (f"[CHECK] missing train labels: {len (missing_train_lbl)}")
+print (f"[CHECK] missing val   labels: {len (missing_val_lbl)}")
 
-sample_lbls = glob.glob(os.path.join(LBL_TRAIN, "*.txt"))[:20]
-range_issues = sum(bad_yolo_lines(p) for p in sample_lbls)
-print(f"[CHECK] sampled train label lines out of [0,1] or malformed: {range_issues}")
+sample_lbls = glob.glob (os.path.join (LBL_TRAIN, "*.txt"))[:20]
+range_issues = sum (bad_yolo_lines (p) for p in sample_lbls)
+print (f"[CHECK] sampled train label lines out of [0,1] or malformed: {range_issues}")
 
-# 3) Quick dataloader smoke test (uses your Dataset & collate_fn)
 try:
-    _train_ds = YoloDataset(IMG_TRAIN, LBL_TRAIN, imgsz=CFG["imgsz"], augment=False, pad_value=CFG["letterbox_pad"], horizontal_flip_prob=0.0)
-    _val_ds   = YoloDataset(IMG_VAL,   LBL_VAL,   imgsz=CFG["imgsz"], augment=False, pad_value=CFG["letterbox_pad"], horizontal_flip_prob=0.0)
+    _train_ds = YoloDataset (IMG_TRAIN, LBL_TRAIN, imgsz = CFG ["imgsz"], augment = False, pad_value = CFG ["letterbox_pad"], horizontal_flip_prob = 0.0)
+    _val_ds   = YoloDataset (IMG_VAL,   LBL_VAL,   imgsz = CFG ["imgsz"], augment = False, pad_value = CFG ["letterbox_pad"], horizontal_flip_prob = 0.0)
 
-    _train_loader = torch.utils.data.DataLoader(
-        _train_ds, batch_size=min(4, max(1, len(_train_ds))), shuffle=True, num_workers=2,
-        collate_fn=collate_fn, pin_memory=torch.cuda.is_available()
+    _train_loader = torch.utils.data.DataLoader (
+        _train_ds, batch_size = min (4, max (1, len (_train_ds))), shuffle = True, num_workers = 2,
+        collate_fn = collate_fn, pin_memory = torch.cuda.is_available()
     )
     _val_loader = torch.utils.data.DataLoader(
-        _val_ds, batch_size=min(4, max(1, len(_val_ds))), shuffle=False, num_workers=2,
-        collate_fn=collate_fn, pin_memory=torch.cuda.is_available()
+        _val_ds, batch_size = min (4, max (1, len (_val_ds))), shuffle = False, num_workers = 2,
+        collate_fn = collate_fn, pin_memory = torch.cuda.is_available()
     )
 
-    xb, tb = next(iter(_train_loader))
-    print("[DL] train batch images:", tuple(xb.shape), xb.dtype)
+    xb, tb = next (iter (_train_loader))
+    print ("[DL] train batch images:", tuple (xb.shape), xb.dtype)
     for k in ("boxes","labels","batch_index"):
-        print(f"[DL] train targets[{k}]:", tuple(tb[k].shape) if hasattr(tb[k], "shape") else type(tb[k]))
+        print (f"[DL] train targets[{k}]:", tuple (tb [k].shape) if hasattr (tb [k], "shape") else type (tb [k]))
 
-    xbv, tbv = next(iter(_val_loader))
-    print("[DL]   val batch images:", tuple(xbv.shape), xbv.dtype)
+    xbv, tbv = next (iter (_val_loader))
+    print ("[DL]   val batch images:", tuple (xbv.shape), xbv.dtype)
 
-    # 4) Assert boxes are within letterboxed frame [0, imgsz]
-    def box_bounds_ok(boxes, size):
-        if boxes.numel()==0: return True
-        x1,y1,x2,y2 = boxes.unbind(-1)
-        return bool( (x1.min() >= 0) and (y1.min() >= 0) and (x2.max() <= size) and (y2.max() <= size) )
+    def box_bounds_ok (boxes, size):
+        if boxes.numel() == 0:
+            return True
+        x1,y1,x2,y2 = boxes.unbind (-1)
+        return bool ((x1.min () >= 0) and (y1.min () >= 0) and (x2.max () <= size) and (y2.max () <= size) )
 
-    ok_train = box_bounds_ok(tb["boxes"], CFG["imgsz"])
-    ok_val   = box_bounds_ok(tbv["boxes"], CFG["imgsz"]) if isinstance(tbv["boxes"], torch.Tensor) else True
-    print(f"[CHECK] boxes within letterbox bounds (train/val): {ok_train}/{ok_val}")
+    ok_train = box_bounds_ok (tb ["boxes"], CFG ["imgsz"])
+    ok_val   = box_bounds_ok (tbv ["boxes"], CFG ["imgsz"]) if isinstance (tbv ["boxes"], torch.Tensor) else True
+    print (f"[CHECK] boxes within letterbox bounds (train/val): {ok_train}/{ok_val}")
 
 except AssertionError as e:
-    print("Dataset assertion:", e)
+    print ("Dataset assertion:", e)
     xb, tb, xbv, tbv = None, None, None, None
 
-# 5) Visualize a few samples (letterboxed images with letterboxed boxes)
-def show_batch(images, targets, num=4, size=CFG["imgsz"], title="train"):
+def show_batch (images, targets, num = 4, size = CFG ["imgsz"], title = "train"):
     if images is None:
-        print(f"[VIS] No {title} batch available");
+        print (f"[VIS] No {title} batch available");
         return
     B = images.shape[0]
-    num = min(num, B)
-    cols = min(2, num)
-    rows = math.ceil(num/cols)
-    plt.figure(figsize=(cols*5, rows*5))
-    for i in range(num):
-        img = images[i].numpy().transpose(1,2,0)  # CHW->HWC
-        img = (np.clip(img,0,1)*255).astype(np.uint8)
-        # collect boxes for this image
-        mask = (targets["batch_index"]==i)
-        boxes = targets["boxes"][mask].cpu().numpy() if torch.is_tensor(targets["boxes"]) else np.zeros((0,4))
-        labels = targets["labels"][mask].cpu().numpy() if torch.is_tensor(targets["labels"]) else np.zeros((0,),dtype=int)
+    num = min (num, B)
+    cols = min (2, num)
+    rows = math.ceil (num / cols)
+    plt.figure (figsize = (cols * 5, rows * 5))
+    for i in range (num):
+        img = images[i].numpy().transpose (1, 2, 0)
+        img = (np.clip (img, 0, 1) * 255).astype (np.uint8)
+        mask = (targets["batch_index"] == i)
+        boxes = targets ["boxes"][mask].cpu ().numpy () if torch.is_tensor (targets ["boxes"]) else np.zeros ((0, 4))
+        labels = targets ["labels"][mask].cpu ().numpy () if torch.is_tensor (targets ["labels"]) else np.zeros ((0,), dtype = int)
 
-        # draw boxes
-        canvas = img.copy()
-        for (x1,y1,x2,y2), c in zip(boxes, labels):
-            x1,y1,x2,y2 = map(int,[x1,y1,x2,y2])
-            cv2.rectangle(canvas,(x1,y1),(x2,y2),(0,255,0),2)
-            cv2.putText(canvas,str(int(c)),(x1,max(0,y1-3)),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,255,0),1,cv2.LINE_AA)
-        plt.subplot(rows, cols, i+1)
-        plt.title(f"{title} #{i}  boxes:{len(boxes)}")
-        plt.imshow(canvas)
-        plt.axis("off")
-    plt.show()
+        canvas = img.copy ()
+        for (x1,y1,x2,y2), c in zip (boxes, labels):
+            x1,y1,x2,y2 = map (int, [x1, y1, x2, y2])
+            cv2.rectangle (canvas,(x1, y1),(x2, y2),(0, 255, 0), 2)
+            cv2.putText (canvas,str (int (c)),(x1,max (0,y1 - 3)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+        plt.subplot (rows, cols, i + 1)
+        plt.title (f"{title} #{i}  boxes:{len (boxes)}")
+        plt.imshow (canvas)
+        plt.axis ("off")
+    plt.show ()
 
-show_batch(xb,  tb,  num=4, title="train")
-show_batch(xbv, tbv, num=4, title="val")
+show_batch(xb, tb, num = 4, title = "train")
+show_batch(xbv, tbv, num = 4, title = "val")
 
-# 6) Current chunk bookkeeping
-if os.path.exists(CURR_CHUNK_TXT):
-    with open(CURR_CHUNK_TXT, "r") as f:
-        curr_paths = [l.strip() for l in f if l.strip()]
-    exists_in_cache = sum(os.path.exists(p) for p in curr_paths)
-    print(f"[CHUNK] current chunk paths listed: {len(curr_paths)}; exist on disk: {exists_in_cache}")
+if os.path.exists (CURR_CHUNK_TXT):
+    with open (CURR_CHUNK_TXT, "r") as f:
+        curr_paths = [l.strip () for l in f if l.strip ()]
+    exists_in_cache = sum (os.path.exists (p) for p in curr_paths)
+    print (f"[CHUNK] current chunk paths listed: {len (curr_paths)}; exist on disk: {exists_in_cache}")
 else:
-    print("[CHUNK] no CURR_CHUNK_TXT found yet")
+    print ("[CHUNK] no CURR_CHUNK_TXT found yet")
 
-if os.path.exists(SEEN_TXT):
-    with open(SEEN_TXT,"r") as f:
-        seen_count = sum(1 for _ in f)
-    print(f"[SEEN] seen_filepaths.txt lines: {seen_count}")
+if os.path.exists (SEEN_TXT):
+    with open (SEEN_TXT, "r") as f:
+        seen_count = sum (1 for _ in f)
+    print (f"[SEEN] seen_filepaths.txt lines: {seen_count}")
 
-print("✅ Sanity check done.")
-# ==== END SANITY CHECK ====
-
+print ("✅ Sanity check done.")
 
 Stage 4: Finally the actual model, Backbone
 
@@ -974,43 +994,36 @@ class YoloModel (nn.Module):
         self.head = YoloV8LiteHead (in_ch = fpn_out, num_classes = num_classes, hidden = head_hidden, num_levels  = 3)
         self.strides = [8, 16, 32]
 
-    def forward(self, x, targets=None):
-      c3, c4, c5 = self.backbone(x)
-      p3, p4, p5 = self.neck(c3, c4, c5)
-      cls_outs, box_outs = self.head([p3, p4, p5])
+    def forward (self, x, targets = None):
+      c3, c4, c5 = self.backbone (x)
+      p3, p4, p5 = self.neck (c3, c4, c5)
+      cls_outs, box_outs = self.head ([p3, p4, p5])
       head_out = {"features": [p3, p4, p5], "cls": cls_outs, "box": box_outs, "strides": self.strides}
 
       # Training path: compute & return standardized loss dict
-      if self.training and targets is not None and hasattr(self, "criterion") and self.criterion is not None:
-          losses, stats = self.criterion(head_out, targets)
-          # Normalize shapes of (losses, stats) so train_step can rely on keys.
+      if self.training and targets is not None and hasattr (self, "criterion") and self.criterion is not None:
+          losses, stats = self.criterion (head_out, targets)
 
-          # losses can be either a scalar tensor OR a dict; handle both
           if torch.is_tensor(losses):
               total_loss = losses
-              # If stats might not contain components, give safe defaults:
-              loss_box = stats.get("loss_box", total_loss.detach()*0)
-              loss_cls = stats.get("loss_cls", total_loss.detach()*0)
-              num_pos  = stats.get("num_pos",  0)
-          elif isinstance(losses, dict):
-              # try common keys
-              total_loss = losses.get("loss") or losses.get("total_loss") or losses.get("overall") or sum([v for v in losses.values() if torch.is_tensor(v)])
-              loss_box   = losses.get("loss_box",  stats.get("loss_box", total_loss.detach()*0))
-              loss_cls   = losses.get("loss_cls",  stats.get("loss_cls", total_loss.detach()*0))
-              num_pos    = losses.get("num_pos",   stats.get("num_pos",  0))
+              loss_box = stats.get ("loss_box", total_loss.detach()*0)
+              loss_cls = stats.get ("loss_cls", total_loss.detach()*0)
+              num_pos  = stats.get ("num_pos",  0)
+          elif isinstance (losses, dict):
+              total_loss = losses.get ("loss") or losses.get ("total_loss") or losses.get ("overall") or sum ([v for v in losses.values () if torch.is_tensor (v)])
+              loss_box   = losses.get ("loss_box",  stats.get ("loss_box", total_loss.detach ()*0))
+              loss_cls   = losses.get ("loss_cls",  stats.get ("loss_cls", total_loss.detach ()*0))
+              num_pos    = losses.get ("num_pos",   stats.get ("num_pos",  0))
           else:
-              raise TypeError("criterion must return Tensor or (dict, stats) with a total loss")
+              raise TypeError ("criterion must return Tensor or (dict, stats) with a total loss")
 
           return {
               "loss": total_loss,
               "loss_box": loss_box,
               "loss_cls": loss_cls,
-              "num_pos": float(num_pos),   # keep as float for logging
-              # keep raw head for optional extra logging if you want
-              # "head_out": head_out,
+              "num_pos": float (num_pos),
           }
 
-      # Inference path: return raw predictions
       return head_out
 
 
@@ -1033,12 +1046,9 @@ Stage 5
 import torch
 #grid and decode utilities
 def make_grid (features_h, features_w, stride, device):
-    #return grid centers in input/letterbox ccoords
-    #centes x and centers y both already multiplied by stride
-
     ys = torch.arange (features_h, device = device)
     xs = torch.arange (features_w, device = device)
-    yy, xx = torch.meshgrid (ys, xs, indexing = "ij") #hxw
+    yy, xx = torch.meshgrid (ys, xs, indexing = "ij")
     cx = (xx + 0.5) * stride
     cy = (yy + 0.5) * stride
     return cx.reshape (-1), cy.reshape (-1)
@@ -1072,22 +1082,17 @@ def flatten_head_outputs (cls_outs, box_outs, strides, image_size):
         bx = bx.permute (0, 2, 3, 1).reshape (B, H * W, 4)
 
         cx, cy = make_grid (H, W, s, device)
-        #exp to (B, HW)
         cx = cx.unsqueeze (0).expand (B, -1)
         cy = cy.unsqueeze (0).expand (B, -1)
 
-        #decode
         for i in range (B):
             xyxy = decode_letterbox_to_xyzy (bx [i], cx [i], cy [i])
 
             xyxy [..., 0::2].clamp_ (0, image_size)
             xyxy [..., 1::2].clamp_ (0, image_size)
-            #(hw,c)
             all_boxes [i].append (xyxy)
-            #(hw, 4)
             all_scores [i].append (cl [i])
 
-    #concat levels
     for i in range (B):
         all_boxes [i] = torch.cat (all_boxes [i], dim = 0)
         all_scores [i] = torch.cat (all_scores [i], dim = 0)
@@ -1102,9 +1107,6 @@ import torchvision.ops as nms
 
 @torch.no_grad ()
 def post_process_one (img_boxes, img_scores, score_thresh = 0.25, iou_thresh = 0.50, max_det = 300):
-    #img_boxes: (N, 4) in xyxy format
-    #img_scores: (N, C)
-    #return: boxes (M, 4), scores (M,), labels (M,)
 
     C = img_scores.shape [1]
     probs = img_scores.sigmoid ()
@@ -1128,8 +1130,6 @@ def post_process_one (img_boxes, img_scores, score_thresh = 0.25, iou_thresh = 0
 
 @torch.no_grad ()
 def model_inference_step (model, images, image_size = 640, score_thresh = 0.25, iou_thresh = 0.50, max_det = 300):
-    #images is (B, 3, H, W)
-    #return list of detections of each images
 
     out = model (images)
     cls_outs = out ["cls"]
@@ -1146,7 +1146,6 @@ def model_inference_step (model, images, image_size = 640, score_thresh = 0.25, 
 
 model.eval ()
 try:
-  # letterboxed to CFG["imgsz"]
     xbv, tbv = next (iter (val_loader))
 except StopIteration:
     raise RuntimeError ("val_loader is empty; stage_val_once() may not have run")
@@ -1204,12 +1203,6 @@ def _make_level_grids (image_size, strides, device):
 
 @torch.no_grad ()
 def build_targets_center_prior (targets, num_classes: int, image_size: int, strides: list, topk: int = 10, center_radius: float = 2.5, device = None):
-    #returns per-image flatted targets for all locations across levels
-    #ret t_cls (N, c) multi hot(most 0, 1 for pos class)
-    #ret t_box_letterbox (N, 4) dis to GT edges (pos); 0 for negative
-    #position_mask: (N, ) bool where pos are true
-    #matched_gt_inds: (N, ) long (indx into per-img gt lst or -1)
-    #n = sum_l (Hl * Wl)
 
     B = len (targets ["image_id"])
     if device is None:
@@ -1246,7 +1239,6 @@ def build_targets_center_prior (targets, num_classes: int, image_size: int, stri
         for L in levels:
             radius = center_radius * L ["stride"]
             HW = L ["H"] * L ["W"]
-            #(HW, )
             cx = L ["cx"]
             cy = L ["cy"]
 
@@ -1310,25 +1302,20 @@ class DetectionLoss (nn.Module):
         self.lambda_box = lambda_box
         self.lambda_cls = lambda_cls
 
-    def forward(self, head_out, targets):
-        # head_out: {"features": [p3, p4, p5], "cls": cls_outs, "box": box_outs, "strides": self.strides}
-        # targets: {"boxes": ..., "labels": ..., "batch_index": ...}
-
+    def forward (self, head_out, targets):
         cls_outs = head_out ["cls"]
         box_outs = head_out ["box"]
         strides = head_out ["strides"]
 
-        # Flatten head outputs per image
         scores_list, boxes_list = flatten_head_outputs (cls_outs, box_outs, strides, self.image_size)
 
-        # Build targets
         per_image_targets, levels = build_targets_center_prior (
             targets,
             num_classes = self.num_classes,
             image_size = self.image_size,
             strides = self.strides,
-            topk = 10, # Hardcoded for now, consider making this a config param
-            center_radius = 2.5, # Hardcoded for now
+            topk = 10,
+            center_radius = 2.5,
             device = cls_outs [0].device,
         )
 
@@ -1338,20 +1325,17 @@ class DetectionLoss (nn.Module):
         num_pos_sum = 0
 
         for i in range (len (scores_list)):
-            # per-image outputs and targets
-            img_scores = scores_list [i] # (N, C)
-            img_boxes  = boxes_list [i] # (N, 4)
+            img_scores = scores_list [i]
+            img_boxes  = boxes_list [i]
             t_cls, t_box_letterbox, position_mask, matched_gt_index = per_image_targets [i]
 
             pos_index = torch.nonzero (position_mask, as_tuple = False).flatten ()
             num_pos = pos_index.numel ()
             num_pos_sum += num_pos
 
-            # Classification loss (BCE with logits)
             loss_cls = F.binary_cross_entropy_with_logits (img_scores, t_cls, reduction = "none")
             loss_cls = loss_cls.sum () / max (1, num_pos) if num_pos else loss_cls.sum () * 0.0 #sum over classes, mean over pos locations
 
-            # Box loss (IoU)
             loss_box = torch.zeros (1, device = img_boxes.device)
             if num_pos:
                 pred_boxes_pos = img_boxes [pos_index]
@@ -1362,8 +1346,7 @@ class DetectionLoss (nn.Module):
             loss_box_sum += loss_box
             loss_cls_sum += loss_cls
 
-        # Average losses over images in batch
-        B = len(scores_list)
+        B = len (scores_list)
         total_loss /= B
         loss_box_sum /= B
         loss_cls_sum /= B
@@ -1377,18 +1360,15 @@ class DetectionLoss (nn.Module):
 
 from torch.amp import GradScaler, autocast
 
-criterion = DetectionLoss(
-    num_classes = CFG["num_classes"],
-    image_size  = CFG["imgsz"],
+criterion = DetectionLoss (
+    num_classes = CFG ["num_classes"],
+    image_size  = CFG ["imgsz"],
     strides     = [8, 16, 32],
-    lambda_box  = CFG["loss_weights"]["box"],
-    lambda_cls  = CFG["loss_weights"]["cls"],
+    lambda_box  = CFG ["loss_weights"]["box"],
+    lambda_cls  = CFG ["loss_weights"]["cls"],
 )
 
-# ✨ attach it here
 model.criterion = criterion
-
-#optimizer + 1 training step with AMP
 
 def build_optimizer (model, cfg):
     if cfg ["optimizer"].lower () == "adamw":
@@ -1405,34 +1385,19 @@ def build_optimizer (model, cfg):
 
 scaler = GradScaler (enabled = CFG ["amp"])
 
-# criterion is already defined above and attached to the model
-# criterion = DetectionLoss (
-#     num_classes = CFG ["num_classes"],
-#     image_size = CFG ["imgsz"],
-#     strides = [8, 16, 32],
-#     lambda_box = CFG ["loss_weights"] ["box"],
-#     lambda_cls = CFG ["loss_weights"] ["cls"],
-# )
-
 optimizer, scheduler = build_optimizer (model, CFG)
 
-def _standardize_losses(losses, stats=None):
-    """
-    Normalize arbitrary (losses, stats) into a dict:
-      {"loss": Tensor, "loss_box": Tensor, "loss_cls": Tensor, "num_pos": float}
-    """
-    if torch.is_tensor(losses):
+def _standardize_losses (losses, stats = None):
+    if torch.is_tensor (losses):
         total = losses
-        lb = stats.get("loss_box", total.detach()*0) if isinstance(stats, dict) else total.detach()*0
-        lc = stats.get("loss_cls", total.detach()*0) if isinstance(stats, dict) else total.detach()*0
-        np_ = float(stats.get("num_pos", 0)) if isinstance(stats, dict) else 0.0
+        lb = stats.get ("loss_box", total.detach () * 0) if isinstance (stats, dict) else total.detach () * 0
+        lc = stats.get ("loss_cls", total.detach ()*0) if isinstance (stats, dict) else total.detach () * 0
+        np_ = float (stats.get ("num_pos", 0)) if isinstance (stats, dict) else 0.0
         return {"loss": total, "loss_box": lb, "loss_cls": lc, "num_pos": np_}
 
-    if isinstance(losses, dict):
-        # try common keys
+    if isinstance (losses, dict):
         total = losses.get("loss") or losses.get("total_loss") or losses.get("overall")
         if total is None:
-            # fallback: sum all tensor values
             total = sum([v for v in losses.values() if torch.is_tensor(v)])
         lb = losses.get("loss_box", (stats.get("loss_box") if isinstance(stats, dict) else total.detach()*0))
         lc = losses.get("loss_cls", (stats.get("loss_cls") if isinstance(stats, dict) else total.detach()*0))
@@ -1441,19 +1406,16 @@ def _standardize_losses(losses, stats=None):
 
     raise TypeError("criterion must return a Tensor or a dict of losses")
 
-def train_step(model, batch, device):
-    model.train()
+def train_step (model, batch, device):
+    model.train ()
     images, targets = batch
-    images = images.to(device, non_blocking=True)
+    images = images.to (device, non_blocking=True)
 
     optimizer.zero_grad(set_to_none=True)
 
-    # new autocast API
     with torch.amp.autocast('cuda', enabled=CFG.get("amp", True)):
-        # forward once to get the head_out
         head_out = model(images)
 
-        # compute loss
         if not (hasattr(model, "criterion") and model.criterion is not None):
             raise RuntimeError("model.criterion is not set; cannot compute training loss.")
         losses, stats = model.criterion(head_out, targets)
@@ -1464,10 +1426,8 @@ def train_step(model, batch, device):
         loss_cls   = loss_dict.get("loss_cls", total_loss.detach()*0)
         num_pos    = loss_dict.get("num_pos", 0.0)
 
-    # backward
     scaler.scale(total_loss).backward()
 
-    # clip (guard unscale_ in case it's been called already by a previous failure)
     if CFG.get("grad_clip_norm", None):
         try:
             scaler.unscale_(optimizer)
@@ -1476,15 +1436,14 @@ def train_step(model, batch, device):
                 raise
         torch.nn.utils.clip_grad_norm_(model.parameters(), CFG["grad_clip_norm"])
 
-    # step + update
-    scaler.step(optimizer)
-    scaler.update()
+    scaler.step (optimizer)
+    scaler.update ()
 
     return {
-        "loss": float(total_loss.detach().item()),
-        "loss_box": float(loss_box.detach().item()) if torch.is_tensor(loss_box) else float(loss_box),
-        "loss_cls": float(loss_cls.detach().item()) if torch.is_tensor(loss_cls) else float(loss_cls),
-        "num_pos": float(num_pos),
+        "loss": float (total_loss.detach().item()),
+        "loss_box": float (loss_box.detach().item()) if torch.is_tensor(loss_box) else float(loss_box),
+        "loss_cls": float (loss_cls.detach().item()) if torch.is_tensor(loss_cls) else float(loss_cls),
+        "num_pos": float (num_pos),
     }
 
 #ema
@@ -1529,7 +1488,7 @@ print (f"[SANITY] Overfitting tiny subset: {len (tiny_subset)} iamges")
 
 history = deque (maxlen = 50)
 
-for epoch in range (3):
+for epoch in range (1):
     t0 = time.time ()
 
     for it, batch in enumerate (tiny_loader):
@@ -1682,272 +1641,213 @@ def load_checkpoint (path, model, ema = None, optimizer = None, scheduler = None
         scheduler.load_state_dict (checkpoint ["scheduler"])
     print ("Loaded checkpoint:", path)
 
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
-
-# interactive mode
-plt.ion()
-fig_live, axs_live = plt.subplots(1, 2, figsize=(12, 6))
-
-def show_live_batch(model, batch, dataset, img_dir, lbl_dir, step, max_images=2):
-    for ax in axs_live:
-        ax.cla()  # clear axes
-
-    images, targets = batch
-    dev = next(model.parameters()).device
-    images_dev = images.to(dev, non_blocking=True)
-    outs = model_inference_step(model, images_dev, image_size=CFG["imgsz"],
-                                score_thresh=0.001, iou_thresh=0.7, max_det=50)
-
-    nshow = min(len(images), max_images)
-    for i in range(nshow):
-        stem = targets["image_id"][i]
-        H, W = targets["original_size"][i]
-        scale = targets["scale"][i]; pad = targets["pad"][i]
-        img_path = None
-        for e in (".jpg",".png",".jpeg",".JPG"):
-            p = os.path.join(img_dir, stem+e)
-            if os.path.exists(p): img_path = p; break
-        if img_path:
-            img_disp = dataset._read_image(img_path)
-        else:
-            img_disp = (images[i].cpu().permute(1,2,0).numpy()*255).astype(np.uint8)
-
-        # preds -> original coords
-        if outs[i]["boxes"].numel() > 0:
-            pred_boxes = undo_letterbox_to_original(outs[i]["boxes"].cpu(), pad, scale, (H,W)).numpy()
-            pred_cls   = outs[i]["classes"].cpu().numpy()
-        else:
-            pred_boxes, pred_cls = [], []
-
-        # gt boxes
-        gt_boxes = np.zeros((0,4)); gt_cls = []
-        lblp = os.path.join(lbl_dir, stem + ".txt")
-        if os.path.exists(lblp):
-            arr = dataset._read_labels(lblp)
-            if arr.size:
-                bxyxy, cls = yolo_to_xyxy(arr, W, H)
-                gt_boxes, gt_cls = np.array(bxyxy), cls.astype(int).tolist()
-
-        # LEFT: preds
-        axs_live[0].imshow(img_disp)
-        axs_live[0].set_title(f"Pred step {step}")
-        for j,(x1,y1,x2,y2) in enumerate(pred_boxes):
-            axs_live[0].add_patch(Rectangle((x1,y1), x2-x1, y2-y1, fill=False, edgecolor="lime", lw=1))
-            axs_live[0].text(x1, y1-2, str(int(pred_cls[j])), fontsize=6, color="lime")
-        axs_live[0].axis("off")
-
-        # RIGHT: GT
-        axs_live[1].imshow(img_disp)
-        axs_live[1].set_title("Ground Truth")
-        for j,(x1,y1,x2,y2) in enumerate(gt_boxes):
-            axs_live[1].add_patch(Rectangle((x1,y1), x2-x1, y2-y1, fill=False, edgecolor="red", lw=1))
-            axs_live[1].text(x1, y1-2, str(gt_cls[j]), fontsize=6, color="red")
-        axs_live[1].axis("off")
-
-    fig_live.suptitle(f"Step {step}")
-    fig_live.canvas.draw()
-    fig_live.canvas.flush_events()
-    plt.pause(0.001)
-
-
-# ===== Stage 8: TRAIN LOOP with live viz & checkpoints =====
 import os, time, math, json, torch
 from collections import defaultdict
 from datetime import datetime
 
-# --- knobs you can tweak quickly ---
-EPOCHS          = min(3, CFG["epochs"])    # keep small first; bump later
-LOG_EVERY       = 20                       # iterations
-VIZ_EVERY       = 5  # show preds vs GT this often
-VAL_EVERY_EPOCH = 1                        # run a tiny val sweep each epoch
-SAVE_EVERY_EPOCH= 1                        # save checkpoint each epoch
-MAX_TRAIN_STEPS = None                     # optional hard cap on steps per epoch (int or None)
+from IPython.display import display, clear_output
+import time
 
-# **Tip for speed**: earlier you set TARGET=2000 in the FO chunk.
-# Drop it to e.g. 256 or 512 before staging to avoid long first epochs.
+global_step     = 0
+last_viz_time   = 0.0
+viz_every       = 20
+min_interval    = 5.0
+EPOCHS          = min (3, CFG ["epochs"])
+LOG_EVERY       = 20
+VIZ_EVERY       = 20
+VAL_EVERY_EPOCH = 1
+SAVE_EVERY_EPOCH= 1
+MAX_TRAIN_STEPS = None
 
-# --- ensure we have train/val loaders (if user re-ran out of order) ---
 if train_loader is None:
-    # Fallback: try to build train loader from dirs
-    TRAIN_IMG_DIR = os.path.join(CFG["data_root"], CFG["train_img_dir"])
-    TRAIN_LBL_DIR = os.path.join(CFG["data_root"], CFG["train_lbl_dir"])
-    if not os.path.isdir(TRAIN_IMG_DIR) or not os.path.isdir(TRAIN_LBL_DIR):
-        raise RuntimeError("Train data dirs not found; run staging cells first.")
-    train_ds = YoloDataset(
-        TRAIN_IMG_DIR, TRAIN_LBL_DIR, imgsz=CFG["imgsz"], augment=True,
-        pad_value=CFG["letterbox_pad"], horizontal_flip_prob=CFG["hflip_p"],
-        hsv_hgain=CFG["hsv_h"], hsv_sgain=CFG["hsv_s"], hsv_vgain=CFG["hsv_v"]
+    TRAIN_IMG_DIR = os.path.join (CFG ["data_root"], CFG ["train_img_dir"])
+    TRAIN_LBL_DIR = os.path.join (CFG ["data_root"], CFG ["train_lbl_dir"])
+    if not os.path.isdir (TRAIN_IMG_DIR) or not os.path.isdir (TRAIN_LBL_DIR):
+        raise RuntimeError ("Train data dirs not found; run staging cells first.")
+    train_ds = YoloDataset (
+        TRAIN_IMG_DIR, TRAIN_LBL_DIR, imgsz = CFG ["imgsz"], augment = True,
+        pad_value = CFG ["letterbox_pad"], horizontal_flip_prob = CFG ["hflip_p"],
+        hsv_hgain = CFG ["hsv_h"], hsv_sgain = CFG ["hsv_s"], hsv_vgain = CFG ["hsv_v"]
     )
-    train_loader = DataLoader(
-        train_ds, batch_size=CFG["batch_size"], shuffle=True, num_workers=2,
-        collate_fn=collate_fn, pin_memory=torch.cuda.is_available(),
-        persistent_workers=False, worker_init_fn=_wif,
-        generator=torch.Generator().manual_seed(CFG["seed"]),
+    train_loader = DataLoader (
+        train_ds, batch_size = CFG ["batch_size"], shuffle = True, num_workers = 2,
+        collate_fn = collate_fn, pin_memory = torch.cuda.is_available (),
+        persistent_workers = False, worker_init_fn = _wif,
+        generator = torch.Generator ().manual_seed (CFG ["seed"]),
     )
 
-# --- small util: fix name mismatch used in earlier helper ---
-def undo_letterbox_to_original(xyxy, pad, scale, original_size):
-    # same as your earlier function name; provided here so live viz doesn't break
+def undo_letterbox_to_original (xyxy, pad, scale, original_size):
     px, py = pad
-    x1 = (xyxy[..., 0] - px) / scale
-    y1 = (xyxy[..., 1] - py) / scale
-    x2 = (xyxy[..., 2] - px) / scale
-    y2 = (xyxy[..., 3] - py) / scale
+    x1 = (xyxy [..., 0] - px) / scale
+    y1 = (xyxy [..., 1] - py) / scale
+    x2 = (xyxy [..., 2] - px) / scale
+    y2 = (xyxy [..., 3] - py) / scale
     H, W = original_size
-    x1.clamp_(0, W - 1); x2.clamp_(0, W - 1)
-    y1.clamp_(0, H - 1); y2.clamp_(0, H - 1)
-    return torch.stack([x1, y1, x2, y2], dim=1)
+    x1.clamp_ (0, W - 1); x2.clamp_ (0, W - 1)
+    y1.clamp_ (0, H - 1); y2.clamp_ (0, H - 1)
+    return torch.stack ([x1, y1, x2, y2], dim = 1)
 
-# --- live viz (fixed to use the function above) ---
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-plt.ion()
-_fig, _axs = plt.subplots(1, 2, figsize=(12, 6))
+plt.ion ()
+_fig, _axs = plt.subplots (1, 2, figsize = (12, 6))
 
-def show_live_batch(model, batch, dataset, img_dir, lbl_dir, step, max_images=2):
-    for ax in _axs: ax.cla()
-
+def show_live_batch (model, batch, dataset, img_dir, lbl_dir, step, max_images = 2):
+    for ax in _axs:
+        ax.cla ()
+    
     images, targets = batch
-    dev = next(model.parameters()).device
-    images_dev = images.to(dev, non_blocking=True)
-    outs = model_inference_step(
-        model, images_dev, image_size=CFG["imgsz"], score_thresh=0.001, iou_thresh=0.7, max_det=50
+    dev = next (model.parameters ()).device
+    images_dev = images.to (dev, non_blocking = True)
+    outs = model_inference_step (
+        model, images_dev, image_size = CFG ["imgsz"], score_thresh = 0.001, iou_thresh = 0.7, max_det = 50
     )
 
-    nshow = min(len(images), max_images)
-    for i in range(nshow):
-        stem = targets["image_id"][i]
-        H, W = targets["orig_size"][i]
-        scale = targets["scale"][i]; pad = targets["pad"][i]
+    nshow = min (len (images), max_images)
+    for i in range (nshow):
+        stem  = targets ["image_id"] [i]
+        H, W  = targets ["orig_size"] [i]
+        scale = targets ["scale"] [i]; pad = targets ["pad"] [i]
 
-        # try to fetch the original image for prettier display
         img_path = None
-        for e in (".jpg",".jpeg",".png",".bmp",".JPG",".JPEG",".PNG",".BMP"):
-            p = os.path.join(img_dir, stem + e)
-            if os.path.exists(p): img_path = p; break
+        for e in (".jpg", ".jpeg", ".png", ".bmp", ".JPG", ".JPEG", ".PNG", ".BMP"):
+            p = os.path.join (img_dir, stem + e)
+            if os.path.exists (p): 
+                img_path = p
+                break
         if img_path:
-            img_disp = dataset._read_image(img_path)
+            img_disp = dataset._read_image (img_path)
         else:
-            img_disp = (images[i].cpu().permute(1,2,0).numpy()*255).astype("uint8")
+            img_disp = (images [i].cpu ().permute (1, 2, 0).numpy () * 255).astype ("uint8")
 
-        # predictions -> original coords
-        if outs[i]["boxes"].numel() > 0:
-            pred_boxes = undo_letterbox_to_original(outs[i]["boxes"].cpu(), pad, scale, (H, W)).numpy()
-            pred_cls   = outs[i]["classes"].cpu().numpy()
+        if outs [i] ["boxes"].numel () > 0:
+            pred_boxes = undo_letterbox_to_original (outs [i] ["boxes"].cpu (), pad, scale, (H, W)).numpy ()
+            pred_cls   = outs [i] ["classes"].cpu ().numpy ()
         else:
             pred_boxes, pred_cls = [], []
 
-        # ground truth
         gt_boxes = []
         gt_cls   = []
-        lp = os.path.join(lbl_dir, stem + ".txt")
-        if os.path.exists(lp):
-            arr = dataset._read_labels(lp)
+        lp = os.path.join (lbl_dir, stem + ".txt")
+        if os.path.exists (lp):
+            arr = dataset._read_labels (lp)
             if arr.size:
-                bxyxy, cls = yolo_to_xyxy(arr, W, H)
-                gt_boxes, gt_cls = bxyxy, cls.astype(int).tolist()
+                bxyxy, cls = yolo_to_xyxy (arr, W, H)
+                gt_boxes, gt_cls = bxyxy, cls.astype (int).tolist ()
 
         # LEFT: predictions
-        _axs[0].imshow(img_disp)
-        _axs[0].set_title(f"Predictions @ step {step}")
-        for j,(x1,y1,x2,y2) in enumerate(pred_boxes):
-            _axs[0].add_patch(Rectangle((x1,y1), x2-x1, y2-y1, fill=False, edgecolor="lime", lw=1))
-            _axs[0].text(x1, max(0,y1-3), str(int(pred_cls[j])), fontsize=7, color="lime")
-        _axs[0].axis("off")
+        _axs [0].imshow (img_disp)
+        _axs [0].set_title (f"Predictions @ step {step}")
+        for j, (x1, y1, x2, y2) in enumerate (pred_boxes):
+            _axs [0].add_patch (Rectangle ((x1, y1), x2 - x1, y2 - y1, fill = False, edgecolor = "lime", lw = 1))
+            _axs [0].text (x1, max (0, y1 - 3), str (int (pred_cls [j])), fontsize = 7, color = "lime")
+        _axs [0].axis ("off")
 
         # RIGHT: ground truth
-        _axs[1].imshow(img_disp)
-        _axs[1].set_title("Ground Truth")
-        for j,(x1,y1,x2,y2) in enumerate(gt_boxes):
-            _axs[1].add_patch(Rectangle((x1,y1), x2-x1, y2-y1, fill=False, edgecolor="red", lw=1))
-            _axs[1].text(x1, max(0,y1-3), str(gt_cls[j]), fontsize=7, color="red")
-        _axs[1].axis("off")
+        _axs [1].imshow (img_disp)
+        _axs [1].set_title ("Ground Truth")
+        for j, (x1, y1, x2, y2) in enumerate (gt_boxes):
+            _axs [1].add_patch (Rectangle ((x1, y1), x2 - x1, y2 - y1, fill = False, edgecolor = "red", lw = 1))
+            _axs [1].text (x1, max (0, y1 - 3), str (gt_cls [j]), fontsize = 7, color = "red")
+        _axs [1].axis ("off")
 
-    _fig.suptitle(f"Step {step}")
-    _fig.canvas.draw()
-    _fig.canvas.flush_events()
-    plt.pause(0.001)
+    _fig.suptitle (f"Step {step}")
+    _fig.canvas.draw ()
+    _fig.canvas.flush_events ()
+    # plt.pause (0.001)  # optional
 
-# --- checkpoint helpers ---
-def save_checkpoint(epoch, model, ema, optimizer, scheduler, run_dir):
+    return _fig  # return the persistent figure so caller can display it
+
+def save_checkpoint (epoch, model, ema, optimizer, scheduler, run_dir):
     ckpt = {
         "epoch": epoch,
-        "model": model.state_dict(),
-        "ema":   ema.module.state_dict() if ema is not None else None,
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "model": model.state_dict (),
+        "ema":   ema.module.state_dict () if ema is not None else None,
+        "optimizer": optimizer.state_dict (),
+        "scheduler": scheduler.state_dict () if scheduler is not None else None,
         "cfg": CFG,
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "timestamp": datetime.now ().isoformat (timespec = "seconds"),
     }
-    path = os.path.join(run_dir, f"ckpt_e{epoch:03d}.pt")
-    torch.save(ckpt, path)
-    print(f"💾 Saved checkpoint -> {path}")
+    path = os.path.join (run_dir, f"ckpt_e{epoch:03d}.pt")
+    torch.save (ckpt, path)
+    print (f"💾 Saved checkpoint -> {path}")
     return path
 
-# --- train/val loops ---
-def validate_brief(model, val_loader, device):
-    model.eval()
+def validate_brief (model, val_loader, device):
+    model.eval ()
     total = 0.0
     nimg  = 0
-    with torch.no_grad():
+    with torch.no_grad ():
         for images, targets in val_loader:
-            images = images.to(device, non_blocking=True)
-            outs = model_inference_step(model, images, image_size=CFG["imgsz"], score_thresh=0.001, iou_thresh=0.7)
-            total += sum(d["boxes"].shape[0] for d in outs)
-            nimg  += images.shape[0]
+            images = images.to (device, non_blocking = True)
+            outs = model_inference_step (model, images, image_size = CFG ["imgsz"], score_thresh = 0.001, iou_thresh = 0.7)
+            total += sum (d ["boxes"].shape [0] for d in outs)
+            nimg  += images.shape [0]
             if nimg >= 64:  # keep it brief
                 break
-    return float(total) / max(1, nimg)
+    return float (total) / max (1, nimg)
 
-print(f"▶️ Starting training for {EPOCHS} epochs on device {device} ...")
+print (f"▶️ Starting training for {EPOCHS} epochs on device {device} ...")
 global_step = 0
 loss_ema = None
 
 try:
-    for epoch in range(1, EPOCHS+1):
-        model.train()
-        t0 = time.time()
-        for it, batch in enumerate(train_loader):
-            # optional step cap per epoch to keep things snappy
+    for epoch in range (1, EPOCHS + 1):
+        model.train ()
+        t0 = time.time ()
+        for it, batch in enumerate (train_loader):
             if MAX_TRAIN_STEPS is not None and it >= MAX_TRAIN_STEPS:
                 break
 
-            stats = train_step(model, batch, device)
-            ema.update(model)
+            stats = train_step (model, batch, device)
+            ema.update (model)
 
-            # running loss (EMA)
-            loss_ema = stats["loss"] if loss_ema is None else (0.9*loss_ema + 0.1*stats["loss"])
-            global_step += 1
+            loss_ema = stats ["loss"] if loss_ema is None else (0.9 * loss_ema + 0.1 * stats ["loss"])
+            global_step += 1   # single increment per batch
 
-            # logs
-            if (it+1) % LOG_EVERY == 0:
-                print(f"epoch {epoch:02d} it {it+1:04d} | "
-                      f"loss {stats['loss']:.4f} (ema {loss_ema:.4f}) | "
-                      f"box {stats['loss_box']:.4f} cls {stats['loss_cls']:.4f} | "
-                      f"pos {stats['num_pos']:.1f} | "
-                      f"{time.time()-t0:.1f}s")
+            if (it + 1) % LOG_EVERY == 0:
+                print (f"epoch {epoch:02d} it {it + 1:04d} | "
+                       f"loss {stats ['loss']:.4f} (ema {loss_ema:.4f}) | "
+                       f"box {stats ['loss_box']:.4f} cls {stats ['loss_cls']:.4f} | "
+                       f"pos {stats ['num_pos']:.1f} | "
+                       f"{time.time () - t0:.1f}s")
 
-            # live viz
-            if VIZ_EVERY and (global_step % VIZ_EVERY == 0):
-                # Show current batch predictions vs GT
-                show_live_batch(ema.module, batch, train_ds, TRAIN_IMG_DIR, TRAIN_LBL_DIR, global_step, max_images=2)
+            should_viz = (global_step % viz_every == 0) or (time.time () - last_viz_time >= min_interval)
 
-        # sched step per-epoch
-        scheduler.step()
+            if should_viz:
+                try:
+                    fig = show_live_batch (
+                        model, batch,
+                        dataset = train_ds,
+                        img_dir = TRAIN_IMG_DIR, lbl_dir = TRAIN_LBL_DIR,
+                        step = global_step, max_images = 4
+                    )
+                    
 
-        # tiny val
+                    clear_output (wait = True)
+                    print (f"epoch {epoch:02d} it {it + 1:04d} | "
+                       f"loss {stats ['loss']:.4f} (ema {loss_ema:.4f}) | "
+                       f"box {stats ['loss_box']:.4f} cls {stats ['loss_cls']:.4f} | "
+                       f"pos {stats ['num_pos']:.1f} | "
+                       f"{time.time () - t0:.1f}s")
+                    display (fig)
+                    # do not close the persistent figure
+                    last_viz_time = time.time ()
+                except Exception as e:
+                    print (f"[live-viz] skipped at step {global_step}: {e}")
+
+        scheduler.step ()
+
         if (epoch % VAL_EVERY_EPOCH) == 0:
-            val_proxy = validate_brief(ema.module, val_loader, device)
-            print(f"🔎 epoch {epoch:02d} brief-val proxy (#dets/img) = {val_proxy:.2f}")
+            val_proxy = validate_brief (ema.module, val_loader, device)
+            print (f"🔎 epoch {epoch:02d} brief-val proxy (#dets/img) = {val_proxy:.2f}")
 
-        # save
         if (epoch % SAVE_EVERY_EPOCH) == 0:
-            save_checkpoint(epoch, model, ema, optimizer, scheduler, RUN_DIR)
+            save_checkpoint (epoch, model, ema, optimizer, scheduler, RUN_DIR)
 
-    print("✅ Training loop finished.")
+    print ("✅ Training loop finished.")
 
 except KeyboardInterrupt:
-    print("\n⛔ Interrupted. Saving emergency checkpoint...")
-    save_checkpoint(epoch, model, ema, optimizer, scheduler, RUN_DIR)
+    print ("\n⛔ Interrupted. Saving emergency checkpoint...")
+    save_checkpoint (epoch, model, ema, optimizer, scheduler, RUN_DIR)
