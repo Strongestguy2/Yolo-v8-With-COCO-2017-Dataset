@@ -156,6 +156,7 @@ DS_TRAIN_ROLL = "coco2017_train_roll2k"
 TARGET = 2000
 
 def load_next_train_chunk (seen_paths, tries=6):
+    from fiftyone import ViewField as F
     seen_paths = list (seen_paths)
     for _ in range (tries):
         seed = int (time.time ()) % 2_000_000_000
@@ -328,6 +329,7 @@ def stage_train_chunk ():
 
   seen = _load_seen ()
   view = load_next_train_chunk (seen)
+  _save_current_chunk ([s.filepath for s in view])
   symlink_and_write_labels (view, "train")
   print ("staged ~2000 training samples.")
 
@@ -936,15 +938,16 @@ class FPN (nn.Module):
         self.p5 = ConvBNAct (out_ch, out_ch, 3, 1)
 
     def forward (self, c3, c4, c5):
-        p5 = self.l5 (c5)
-        p4 = self.l4 (c4) + F.interpolate (p5, size = c4.shape [-2:], mode = "nearest")
-        p3 = self.l3 (c3) + F.interpolate (p4, size = c3.shape [-2:], mode = "nearest")
+      import torch.nn.functional as F
+      p5 = self.l5 (c5)
+      p4 = self.l4 (c4) + F.interpolate (p5, size = c4.shape [-2:], mode = "nearest")
+      p3 = self.l3 (c3) + F.interpolate (p4, size = c3.shape [-2:], mode = "nearest")
 
-        p5 = self.p5 (p5)
-        p4 = self.p4 (p4)
-        p3 = self.p3 (p3)
+      p5 = self.p5 (p5)
+      p4 = self.p4 (p4)
+      p3 = self.p3 (p3)
 
-        return p3, p4, p5
+      return p3, p4, p5
 
 
 #models/head + wrapper
@@ -1042,8 +1045,6 @@ for i, (c, b) in enumerate (zip (out ["cls"], out ["box"])):
 Stage 5
 
 
-#forward pass
-import torch
 #grid and decode utilities
 def make_grid (features_h, features_w, stride, device):
     ys = torch.arange (features_h, device = device)
@@ -1053,7 +1054,7 @@ def make_grid (features_h, features_w, stride, device):
     cy = (yy + 0.5) * stride
     return cx.reshape (-1), cy.reshape (-1)
 
-def decode_letterbox_to_xyzy (letterbox, centers_x, centers_y):
+def decode_letterbox_to_xyxy (letterbox, centers_x, centers_y):
     #(n, 4), ltrb in letterbox coords
     #(n,) centers x and y in input coords
     #returns xyxy: (n, 4)
@@ -1086,7 +1087,7 @@ def flatten_head_outputs (cls_outs, box_outs, strides, image_size):
         cy = cy.unsqueeze (0).expand (B, -1)
 
         for i in range (B):
-            xyxy = decode_letterbox_to_xyzy (bx [i], cx [i], cy [i])
+            xyxy = decode_letterbox_to_xyxy (bx [i], cx [i], cy [i])
 
             xyxy [..., 0::2].clamp_ (0, image_size)
             xyxy [..., 1::2].clamp_ (0, image_size)
@@ -1098,7 +1099,6 @@ def flatten_head_outputs (cls_outs, box_outs, strides, image_size):
         all_scores [i] = torch.cat (all_scores [i], dim = 0)
 
     return all_scores, all_boxes
-
 
 import torch
 import torchvision.ops as nms
@@ -1202,8 +1202,16 @@ def _make_level_grids (image_size, strides, device):
     return levels
 
 @torch.no_grad ()
-def build_targets_center_prior (targets, num_classes: int, image_size: int, strides: list, topk: int = 10, center_radius: float = 2.5, device = None):
-
+def build_targets_center_prior (
+    targets,
+    num_classes : int,
+    image_size : int,
+    strides : list,
+    topk : int = 10,
+    center_radius : float = 2.5,
+    device = None,
+):
+    
     B = len (targets ["image_id"])
     if device is None:
         device = targets ["boxes"].device if torch.is_tensor (targets ["boxes"]) else torch.device ("cpu")
@@ -1212,9 +1220,14 @@ def build_targets_center_prior (targets, num_classes: int, image_size: int, stri
     per_image = []
 
     M = targets ["boxes"].shape [0]
-    bidx = targets ["batch_index"].to (device) if torch.is_tensor (targets ["batch_index"]) else torch.tensor ([], dtype = torch.long, device = device)
-    boxes_all = targets ["boxes"].to (device).float () if M else torch.zeros ((0, 4), device = device)
-    labels_all = targets ["labels"].to (device).long () if M else torch.zeros ((0,), dtype = torch.long, device = device)
+    bidx = targets ["batch_index"].to (device) if torch.is_tensor (targets ["batch_index"]) \
+           else torch.tensor ([], dtype = torch.long, device = device)
+    boxes_all  = targets ["boxes"].to (device).float () if M else torch.zeros ((0, 4), device = device)
+    labels_all = targets ["labels"].to (device).long ()  if M else torch.zeros ((0,), dtype = torch.long, device = device)
+
+    centers_x_all = torch.cat ([L ["cx"] for L in levels], dim = 0)
+    centers_y_all = torch.cat ([L ["cy"] for L in levels], dim = 0)
+    N = centers_x_all.numel ()
 
     for i in range (B):
         sel = (bidx == i)
@@ -1222,30 +1235,27 @@ def build_targets_center_prior (targets, num_classes: int, image_size: int, stri
         gc = labels_all [sel]
         Gi = gt.shape [0]
 
-        centers_x = torch.cat ([L ["cx"] for L in levels], dim = 0)
-        centers_y = torch.cat ([L ["cy"] for L in levels], dim = 0)
-        N = centers_x.numel ()
-
-        position_mask = torch.zeros (N, dtype = torch.bool, device = device)
-        t_box_letterbox = torch.zeros (N, 4, device = device)
-        t_cls = torch.zeros (N, num_classes, device = device)
+        position_mask    = torch.zeros (N, dtype = torch.bool, device = device)
+        t_box_letterbox  = torch.zeros (N, 4, device = device)
+        t_box_xyxy       = torch.zeros (N, 4, device = device)
+        t_cls            = torch.zeros (N, num_classes, device = device)
         matched_gt_index = torch.full ((N,), -1, dtype = torch.long, device = device)
 
         if Gi == 0:
-            per_image.append ((t_cls, t_box_letterbox, position_mask, matched_gt_index))
+            per_image.append ((t_cls, t_box_letterbox, t_box_xyxy, position_mask, matched_gt_index))
             continue
 
         start = 0
         for L in levels:
             radius = center_radius * L ["stride"]
-            HW = L ["H"] * L ["W"]
-            cx = L ["cx"]
-            cy = L ["cy"]
+            HW     = L ["H"] * L ["W"]
+            cx     = L ["cx"]
+            cy     = L ["cy"]
 
-            gx1 = (gt [:, 0]- radius).clamp_ (0, image_size)
-            gy1 = (gt [:, 1]- radius).clamp_ (0, image_size)
-            gx2 = (gt [:, 2]+ radius).clamp_ (0, image_size)
-            gy2 = (gt [:, 3]+ radius).clamp_ (0, image_size)
+            gx1 = (gt [:, 0] - radius).clamp_ (0, image_size)
+            gy1 = (gt [:, 1] - radius).clamp_ (0, image_size)
+            gx2 = (gt [:, 2] + radius).clamp_ (0, image_size)
+            gy2 = (gt [:, 3] + radius).clamp_ (0, image_size)
 
             in_x = (cx.unsqueeze (0) >= gx1.unsqueeze (1)) & (cx.unsqueeze (0) <= gx2.unsqueeze (1))
             in_y = (cy.unsqueeze (0) >= gy1.unsqueeze (1)) & (cy.unsqueeze (0) <= gy2.unsqueeze (1))
@@ -1260,103 +1270,135 @@ def build_targets_center_prior (targets, num_classes: int, image_size: int, stri
 
                 distance_masked = torch.where (inside, distance, torch.full_like (distance, 1e9))
                 k = min (topk, HW)
-                _, indexs = torch.topk (-distance_masked, k = k, dim = 1)
-                flat_index = indexs + start
-                position_mask [flat_index.reshape (-1)] = True
-
-                matched_gt_index [flat_index.reshape (-1)] = torch.arange (Gi, device = device).unsqueeze (1).expand (-1, k).reshape (-1)
+                _, inds = torch.topk (-distance_masked, k=k, dim=1)
+                flat_index = (inds + start).reshape (-1)
+                position_mask [flat_index] = True
+                matched_gt_index [flat_index] = torch.arange (Gi, device = device).unsqueeze (1).expand (-1, k).reshape (-1)
 
             start += HW
 
-        pos_index = torch.nonzero (position_mask, as_tuple = False).flatten ()
+        pos_index = torch.nonzero (position_mask, as_tuple=  False).flatten ()
 
         if pos_index.numel ():
-            mg: torch.Tensor = matched_gt_index [pos_index]
+            mg = matched_gt_index [pos_index]
             gt_sel = gt [mg]
 
-            centers_x_all = torch.cat ([L ["cx"] for L in levels], dim = 0)
-            centers_y_all = torch.cat ([L ["cy"] for L in levels], dim = 0)
             cxp = centers_x_all [pos_index]
             cyp = centers_y_all [pos_index]
 
+            # LTRB distances
             l = (cxp - gt_sel [:, 0]).clamp_min (0)
             t = (cyp - gt_sel [:, 1]).clamp_min (0)
             r = (gt_sel [:, 2] - cxp).clamp_min (0)
             b = (gt_sel [:, 3] - cyp).clamp_min (0)
             t_box_letterbox [pos_index] = torch.stack ([l, t, r, b], dim = 1)
 
+            x1 = cxp - l
+            y1 = cyp - t
+            x2 = cxp + r
+            y2 = cyp + b
+            t_box_xyxy [pos_index] = torch.stack ([x1, y1, x2, y2], dim = 1)
+
             t_cls [pos_index, gc [mg]] = 1.0
 
-        per_image.append ((t_cls, t_box_letterbox, position_mask, matched_gt_index))
+        per_image.append ((t_cls, t_box_letterbox, t_box_xyxy, position_mask, matched_gt_index))
 
     return per_image, levels
 
-#loss writing
+def sigmoid_focal_loss(logits, targets, alpha=0.25, gamma=2.0, reduction="sum"):
+    # logits, targets: same shape
+    p = torch.sigmoid(logits)
+    ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    p_t = p*targets + (1 - p)*(1 - targets)
+    loss = ce * ((1 - p_t) ** gamma)
+    if alpha is not None:
+        alpha_t = alpha*targets + (1 - alpha)*(1 - targets)
+        loss = alpha_t * loss
+    if reduction == "sum":
+        return loss.sum()
+    elif reduction == "mean":
+        return loss.mean()
+    return loss
 
-class DetectionLoss (nn.Module):
-    def __init__ (self, num_classes, image_size, strides, lambda_box = 2.5, lambda_cls = 1.0):
-        super ().__init__ ()
+class DetectionLoss(nn.Module):
+    def __init__(self, num_classes, image_size, strides, lambda_box=2.5, lambda_cls=1.0):
+        super().__init__()
         self.num_classes = num_classes
         self.image_size = image_size
         self.strides = strides
         self.lambda_box = lambda_box
         self.lambda_cls = lambda_cls
 
-    def forward (self, head_out, targets):
-        cls_outs = head_out ["cls"]
-        box_outs = head_out ["box"]
-        strides = head_out ["strides"]
+    def forward(self, head_out, targets):
+        cls_outs = head_out["cls"]
+        box_outs = head_out["box"]
+        strides  = head_out["strides"]
 
-        scores_list, boxes_list = flatten_head_outputs (cls_outs, box_outs, strides, self.image_size)
+        device = cls_outs[0].device
+        scores_list, boxes_list = flatten_head_outputs(cls_outs, box_outs, strides, self.image_size)
 
-        per_image_targets, levels = build_targets_center_prior (
+        per_image_targets, _levels = build_targets_center_prior(
             targets,
-            num_classes = self.num_classes,
-            image_size = self.image_size,
-            strides = self.strides,
-            topk = 10,
-            center_radius = 2.5,
-            device = cls_outs [0].device,
+            num_classes=self.num_classes,
+            image_size=self.image_size,
+            strides=self.strides,
+            topk=10,
+            center_radius=2.5,
+            device=device,
         )
 
-        total_loss = torch.zeros (1, device = cls_outs [0].device)
-        loss_box_sum = torch.zeros (1, device = cls_outs [0].device)
-        loss_cls_sum = torch.zeros (1, device = cls_outs [0].device)
-        num_pos_sum = 0
+        total_loss   = torch.zeros((), device=device)
+        loss_box_sum = torch.zeros((), device=device)
+        loss_cls_sum = torch.zeros((), device=device)
+        num_pos_sum  = 0
 
-        for i in range (len (scores_list)):
-            img_scores = scores_list [i]
-            img_boxes  = boxes_list [i]
-            t_cls, t_box_letterbox, position_mask, matched_gt_index = per_image_targets [i]
+        for i in range(len(scores_list)):
+            img_scores = scores_list[i]  # (N, C)
+            img_boxes  = boxes_list[i]   # (N, 4)
+            t_cls, t_box_letterbox, t_box_xyxy, position_mask, matched_gt_index = per_image_targets[i]
 
-            pos_index = torch.nonzero (position_mask, as_tuple = False).flatten ()
-            num_pos = pos_index.numel ()
+            pos_index = torch.nonzero(position_mask, as_tuple=False).flatten()
+            num_pos   = pos_index.numel()
             num_pos_sum += num_pos
 
-            loss_cls = F.binary_cross_entropy_with_logits (img_scores, t_cls, reduction = "none")
-            loss_cls = loss_cls.sum () / max (1, num_pos) if num_pos else loss_cls.sum () * 0.0 #sum over classes, mean over pos locations
-
-            loss_box = torch.zeros (1, device = img_boxes.device)
+            # --- classification loss: positives only, matched class only ---
             if num_pos:
-                pred_boxes_pos = img_boxes [pos_index]
-                target_boxes_pos = t_box_letterbox [pos_index]
-                loss_box = iou_loss (pred_boxes_pos, target_boxes_pos).sum () / num_pos
+                # class id from one-hot targets
+                cls_ids    = t_cls[pos_index].argmax(dim=1)          # (P,)
+                logits_pos = img_scores[pos_index, cls_ids]          # (P,)
+                targets_pos= torch.ones_like(logits_pos)             # positives = 1
+                loss_cls   = F.binary_cross_entropy_with_logits(logits_pos, targets_pos, reduction="mean")
+            else:
+                loss_cls = img_scores.new_zeros(())
 
-            total_loss += self.lambda_cls * loss_cls + self.lambda_box * loss_box
-            loss_box_sum += loss_box
-            loss_cls_sum += loss_cls
+            # --- box loss: positives only (IoU on decoded xyxy) ---
+            if num_pos:
+                pred_boxes_pos   = img_boxes[pos_index]
+                target_boxes_pos = t_box_xyxy[pos_index]
+                # mean over positives
+                loss_box = iou_loss(pred_boxes_pos, target_boxes_pos).mean()
+            else:
+                loss_box = img_boxes.new_zeros(())
 
-        B = len (scores_list)
-        total_loss /= B
-        loss_box_sum /= B
-        loss_cls_sum /= B
-        num_pos_avg = num_pos_sum / B
+            total_loss   = total_loss   + self.lambda_cls * loss_cls + self.lambda_box * loss_box
+            loss_box_sum = loss_box_sum + loss_box
+            loss_cls_sum = loss_cls_sum + loss_cls
+
+        B = len(scores_list)
+        total_loss   = total_loss   / max(1, B)
+        loss_box_sum = loss_box_sum / max(1, B)
+        loss_cls_sum = loss_cls_sum / max(1, B)
+        num_pos_avg  = num_pos_sum  / max(1, B)
 
         return total_loss, {
             "loss_box": loss_box_sum,
             "loss_cls": loss_cls_sum,
-            "num_pos": num_pos_avg,
+            "num_pos":  num_pos_avg,
         }
+
+with torch.no_grad():
+    for conv in model.head.cls_preds:
+        conv.bias.fill_( -4.595 )
 
 from torch.amp import GradScaler, autocast
 
@@ -1522,7 +1564,8 @@ def build_loader (image_dir, label_dir, cfg, shuffle):
     dl = DataLoader (
         ds, batch_size = cfg ["batch_size"], shuffle = shuffle, num_workers = 4,
         collate_fn = collate_fn, pin_memory = torch.cuda.is_available (),
-        persistent_workers = torch.Generator ().manual_seed (cfg ["seed"]),
+        persistent_workers = False,
+        generator = torch.Generator ().manual_seed (cfg ["seed"]),
     )
     return ds, dl
 
@@ -1530,6 +1573,7 @@ VAL_IMG_DIR = os.path.join (CFG ["data_root"], CFG ["val_img_dir"])
 VAL_LBL_DIR = os.path.join (CFG ["data_root"], CFG ["val_lbl_dir"])
 val_ds, val_loader = build_loader (VAL_IMG_DIR, VAL_LBL_DIR, CFG, shuffle = False)
 print ("val size:", len (val_ds))
+
 
 #coco mAP eval
 from pycocotools.coco import COCO
@@ -1571,7 +1615,8 @@ def evaluate_map_coco (model, val_loader, device, imgsz = 640, score_thresh = 0.
         lp = os.path.join (VAL_LBL_DIR, stem + ".txt")
 
         if os.path.exists (lp):
-            arr = val_loader.dataset._read_label (lp)
+            arr = val_loader.dataset._read_labels (lp)
+
             if arr.size:
                 boxes, cls = yolo_to_xyxy (arr, W, H)
                 for j , (x1, y1, x2, y2) in enumerate (boxes):
@@ -1599,7 +1644,7 @@ def evaluate_map_coco (model, val_loader, device, imgsz = 640, score_thresh = 0.
         for b, det in enumerate (outs):
             stem = targets ["image_id"]
             image_index = val_loader.dataset.stems.index (stem)
-            H, W = targets ["original_size"] [b]
+            H, W = targets ["orig_size"] [b]
             scale = targets ["scale"][b]
             pad = targets ["pad"][b]
             if det ["boxes"].numel () == 0:
@@ -1640,11 +1685,41 @@ def load_checkpoint (path, model, ema = None, optimizer = None, scheduler = None
     if scheduler and "scheduler" in checkpoint:
         scheduler.load_state_dict (checkpoint ["scheduler"])
     print ("Loaded checkpoint:", path)
+    return checkpoint.get ("epoch", 0)
+
+ckpt_path = "/content/drive/MyDrive/yolo-lab/runs/20250929_180837_yolov8_coco_proto/ckpt_e003.pt"
+
+start_epoch = load_checkpoint (
+    ckpt_path,
+    model,
+    ema = ema,
+    optimizer = optimizer,
+    scheduler = scheduler,
+    device = device
+)
+
+start_epoch = load_checkpoint (
+    ckpt_path,
+    model,
+    ema = ema,
+    optimizer = optimizer,
+    scheduler = scheduler,
+    device = device
+)
+
+def maybe_resume_current_run(RUN_DIR, model, ema, optimizer, scheduler, device):
+    last = _latest_checkpoint_path(RUN_DIR)
+    if last:
+        ep = load_checkpoint(last, model, ema=ema, optimizer=optimizer, scheduler=scheduler, device=device)
+        print(f"[resume] current run: {RUN_DIR} -> {last} (epoch {ep})")
+        return int(ep)
+    print(f"[resume] no checkpoints in {RUN_DIR} — starting fresh")
+    return 0
 
 import os, time, math, json, torch
 from collections import defaultdict
 from datetime import datetime
-
+import torch.nn.functional as F
 from IPython.display import display, clear_output
 import time
 
@@ -1652,7 +1727,7 @@ global_step     = 0
 last_viz_time   = 0.0
 viz_every       = 20
 min_interval    = 5.0
-EPOCHS          = min (3, CFG ["epochs"])
+EPOCHS          = 9
 LOG_EVERY       = 20
 VIZ_EVERY       = 20
 VAL_EVERY_EPOCH = 1
@@ -1696,7 +1771,7 @@ _fig, _axs = plt.subplots (1, 2, figsize = (12, 6))
 def show_live_batch (model, batch, dataset, img_dir, lbl_dir, step, max_images = 2):
     for ax in _axs:
         ax.cla ()
-    
+
     images, targets = batch
     dev = next (model.parameters ()).device
     images_dev = images.to (dev, non_blocking = True)
@@ -1713,7 +1788,7 @@ def show_live_batch (model, batch, dataset, img_dir, lbl_dir, step, max_images =
         img_path = None
         for e in (".jpg", ".jpeg", ".png", ".bmp", ".JPG", ".JPEG", ".PNG", ".BMP"):
             p = os.path.join (img_dir, stem + e)
-            if os.path.exists (p): 
+            if os.path.exists (p):
                 img_path = p
                 break
         if img_path:
@@ -1792,8 +1867,12 @@ print (f"▶️ Starting training for {EPOCHS} epochs on device {device} ...")
 global_step = 0
 loss_ema = None
 
+
 try:
-    for epoch in range (1, EPOCHS + 1):
+    start_epoch = 0
+    if CFG.get("resume", True):
+      start_epoch = maybe_resume_current_run(RUN_DIR, model, ema, optimizer, scheduler, device)
+    for epoch in range (start_epoch + 1, EPOCHS + 1):
         model.train ()
         t0 = time.time ()
         for it, batch in enumerate (train_loader):
@@ -1823,7 +1902,7 @@ try:
                         img_dir = TRAIN_IMG_DIR, lbl_dir = TRAIN_LBL_DIR,
                         step = global_step, max_images = 4
                     )
-                    
+
 
                     clear_output (wait = True)
                     print (f"epoch {epoch:02d} it {it + 1:04d} | "
@@ -1848,6 +1927,102 @@ try:
 
     print ("✅ Training loop finished.")
 
-except KeyboardInterrupt:
+except Exception as e:
     print ("\n⛔ Interrupted. Saving emergency checkpoint...")
     save_checkpoint (epoch, model, ema, optimizer, scheduler, RUN_DIR)
+
+import os, glob
+
+
+def _latest_checkpoint_path (run_dir):
+    pats = sorted (glob.glob (os.path.join (run_dir, "ckpt_e*.pt")))
+    return pats [-1] if pats else None
+
+def resume_from_latest (run_dir, model, ema = None, optimizer = None, scheduler = None, device = "cuda"):
+    ck = _latest_checkpoint_path (run_dir)
+    if ck is None:
+        print ("[resume] no checkpoint found in", run_dir)
+        return 0
+    if "load_checkpoint" not in globals ():
+        raise RuntimeError ("load_checkpoint () is not defined in this runtime")
+    last_epoch = load_checkpoint (ck, model, ema = ema, optimizer = optimizer, scheduler = scheduler, device = device)
+    print (f"[resume] loaded {ck} (epoch {last_epoch})")
+    return int (last_epoch)
+
+def roll_next_train_chunk ():
+    """
+    Disposes current staged train chunk, marks it as seen, optionally deletes cached media,
+    stages a fresh ~2000-sample train view, then rebuilds train_ds and train_loader.
+    """
+    print ("🔁 Rolling to next train chunk...")
+    # uses your existing helpers and files: SEEN_TXT, CURR_CHUNK_TXT, FO_CACHE_DIR
+    dispose_current_chunk (delete_from_cache = True, mark_seen = True)   # resets /content/yolo_data/* and appends seen  :contentReference[oaicite:1]{index=1}
+    stage_train_chunk ()                                                 # loads fresh 2k with low overlap + writes YOLO labels  :contentReference[oaicite:2]{index=2}
+
+    # rebuild dataset + loader with the same config you used before
+    global train_ds, train_loader, TRAIN_IMG_DIR, TRAIN_LBL_DIR
+    TRAIN_IMG_DIR = os.path.join (CFG ["data_root"], CFG ["train_img_dir"])
+    TRAIN_LBL_DIR = os.path.join (CFG ["data_root"], CFG ["train_lbl_dir"])
+
+    train_ds = YoloDataset (
+        TRAIN_IMG_DIR, TRAIN_LBL_DIR,
+        imgsz = CFG ["imgsz"], augment = True,
+        pad_value = CFG ["letterbox_pad"], horizontal_flip_prob = CFG ["hflip_p"],
+        hsv_hgain = CFG ["hsv_h"], hsv_sgain = CFG ["hsv_s"], hsv_vgain = CFG ["hsv_v"]
+    )
+    train_loader = DataLoader (
+        train_ds, batch_size = CFG ["batch_size"], shuffle = True, num_workers = 4,
+        collate_fn = collate_fn, pin_memory = torch.cuda.is_available (),
+        persistent_workers = False, worker_init_fn = _wif,
+        generator = torch.Generator ().manual_seed (CFG ["seed"]),
+    )
+
+    print (f"[roll] staged train images: {len (train_ds)}  (dir = {TRAIN_IMG_DIR})")
+    return train_ds, train_loader
+
+'''
+import gc, torch
+
+# 1) Drop references from the last epoch/loop
+last_batch = None  # if you keep any refs for debugging, set them to None
+
+# 2) Kill old loader/dataset so worker processes and pinned buffers can exit
+try:
+    _ = iter (train_loader)
+except:
+    pass
+del train_loader, train_ds
+gc.collect ()
+
+# 3) Flush CUDA cache from previous batches
+torch.cuda.empty_cache ()
+torch.cuda.reset_peak_memory_stats ()
+train_ds, train_loader = roll_next_train_chunk ()
+'''
+
+#resume
+from fiftyone import ViewField as F
+
+# 2) resume model & optimizer from latest checkpoint
+start_epoch = resume_from_latest (RUN_DIR, model, ema, optimizer, scheduler, device)
+
+# 3) rebuild dataset and loader from the last chunk you rolled to
+TRAIN_IMG_DIR = os.path.join (CFG ["data_root"], CFG ["train_img_dir"])
+TRAIN_LBL_DIR = os.path.join (CFG ["data_root"], CFG ["train_lbl_dir"])
+
+train_ds = YoloDataset (
+    TRAIN_IMG_DIR, TRAIN_LBL_DIR,
+    imgsz = CFG ["imgsz"], augment = True,
+    pad_value = CFG ["letterbox_pad"], horizontal_flip_prob = CFG ["hflip_p"],
+    hsv_hgain = CFG ["hsv_h"], hsv_sgain = CFG ["hsv_s"], hsv_vgain = CFG ["hsv_v"]
+)
+train_loader = DataLoader (
+    train_ds, batch_size = CFG ["batch_size"], shuffle = True, num_workers = 4,
+    collate_fn = collate_fn, pin_memory = torch.cuda.is_available (),
+    persistent_workers = False, worker_init_fn = _wif,
+    generator = torch.Generator ().manual_seed (CFG ["seed"]),
+)
+
+import torch
+print("allocated:", torch.cuda.memory_allocated() / 1024**3, "GB")
+print("cached   :", torch.cuda.memory_reserved() / 1024**3, "GB")
