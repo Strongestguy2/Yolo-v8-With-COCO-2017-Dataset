@@ -1211,7 +1211,7 @@ def build_targets_center_prior (
     center_radius : float = 2.5,
     device = None,
 ):
-    
+
     B = len (targets ["image_id"])
     if device is None:
         device = targets ["boxes"].device if torch.is_tensor (targets ["boxes"]) else torch.device ("cpu")
