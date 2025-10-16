@@ -126,9 +126,16 @@ CFG = {
     "grad_clip_norm" : 10.0,
     "ema_decay" : 0.9998,
 
+    "region_max" : 16,
     "assigner" : "center_prior",
     "iou_type" : "ciou",
     "loss_weights" : {"box" : 2.5, "cls" : 1.0, "obj" : 1.0, "dfl" : 0.0},
+    
+    #tal
+    "tal_alpha" : 1.0,
+    "tal_beta" : 6.0,
+    "tal_topk" : 10,
+    "tal_center_radius" : 2.5,
 }
 
 pprint (CFG)
@@ -949,16 +956,27 @@ class FPN (nn.Module):
 
       return p3, p4, p5
 
+class Integral (nn.Module):
+    def __init__ (self, reg_max : int):
+        super ().__init__ ()
+        self.reg_max = int (reg_max)
+        self.register_buffer ("proj", torch.arange (self.reg_max + 1, dtype = torch.float32), persistent = False)
+
+    def forward (self, logits):
+        prob = logits.softmax (dim = -1)
+        return (prob * self.proj).sum (dim = -1)
 
 #models/head + wrapper
 class YoloV8LiteHead (nn.Module):
     #decoupled head, anchor free, no objectness
     #box predicts LTRB distances (>= 0). Will add DFL Later
 
-    def __init__ (self, in_ch = 256, num_classes = 80, hidden = 256, num_levels = 3):
+    def __init__ (self, in_ch = 256, num_classes = 80, hidden = 256, num_levels = 3, reg_max = None):
         super ().__init__ ()
         self.num_classes = num_classes
         self.num_levels = num_levels
+        self.reg_max = CFG.get ("reg_max", 16) if reg_max is None else int (reg_max)
+        self.integral = Integral (self.reg_max)
 
         def make_tower ():
             return nn.Sequential (
@@ -970,7 +988,7 @@ class YoloV8LiteHead (nn.Module):
         self.reg_towers = nn.ModuleList ([make_tower () for _ in range (num_levels)])
 
         self.cls_preds = nn.ModuleList ([nn.Conv2d (hidden, num_classes, 1) for _ in range (num_levels)])
-        self.box_preds = nn.ModuleList ([nn.Conv2d (hidden, 4, 1) for _ in range (num_levels)])
+        self.box_preds = nn.ModuleList ([nn.Conv2d (hidden, 4 * (self.reg_max + 1), 1) for _ in range (num_levels)])
 
     def forward (self, features):
         #features: list of [p3, p4, p5], each is [B, C, H, W]
@@ -983,7 +1001,7 @@ class YoloV8LiteHead (nn.Module):
             cls_tower = self.cls_towers [i] (f)
             reg_tower = self.reg_towers [i] (f)
             cls_outs.append (self.cls_preds [i] (cls_tower))
-            box_outs.append (nn.functional.softplus (self.box_preds [i] (reg_tower)))
+            box_outs.append (self.box_preds [i] (reg_tower))
             #incase jason doesn't know, softplus is ln (1 + exp(x)), always > 0
         return cls_outs, box_outs
 
@@ -1076,18 +1094,25 @@ def flatten_head_outputs (cls_outs, box_outs, strides, image_size):
     all_scores = [[] for _ in range (B)]
     all_boxes = [[] for _ in range (B)]
 
-    for level, (cl, bx, s) in enumerate (zip (cls_outs, box_outs, strides)):
+    for (cl, bx, s) in zip (cls_outs, box_outs, strides):
         B_, C, H, W = cl.shape
         assert B_ == B
+
         cl = cl.permute (0, 2, 3, 1).reshape (B, H * W, C)
-        bx = bx.permute (0, 2, 3, 1).reshape (B, H * W, 4)
+
+        M1 = bx.shape [1] // 4
+        bx = bx.view (B, M1, 4, H, W).permute (0, 3, 4, 1, 2).reshape (B, H * W, 4, M1)
+
+        probs = bx.softmax (dim = -1)
+        proj = torch.arange (M1, device = bx.device, dtype = bx.dtype)
+        dists = (probs * proj).sum (dim = -1) * float (s)
 
         cx, cy = make_grid (H, W, s, device)
         cx = cx.unsqueeze (0).expand (B, -1)
         cy = cy.unsqueeze (0).expand (B, -1)
 
         for i in range (B):
-            xyxy = decode_letterbox_to_xyxy (bx [i], cx [i], cy [i])
+            xyxy = decode_letterbox_to_xyxy (dists [i], cx [i], cy [i])
 
             xyxy [..., 0::2].clamp_ (0, image_size)
             xyxy [..., 1::2].clamp_ (0, image_size)
@@ -1099,6 +1124,7 @@ def flatten_head_outputs (cls_outs, box_outs, strides, image_size):
         all_scores [i] = torch.cat (all_scores [i], dim = 0)
 
     return all_scores, all_boxes
+
 
 import torch
 import torchvision.ops as nms
@@ -1161,6 +1187,21 @@ for i, d in enumerate (dets [:2]):
 Stage 6
 
 
+def dfl_targets (ltrb_pixels, stride, reg_max : int):
+    x = (ltrb_pixels / float (stride)).clamp_ (0.0, float (reg_max))
+    l = x.floor ().clamp_ (max = float (reg_max)).long ()
+    r = (l + 1).clamp_ (max = reg_max)
+    w_r = (x - l.float ())
+    w_l = 1.0 - w_r
+    return l, r, w_l, w_r
+
+def dfl_loss_from_logits (logits_pos, l_idx, r_idx, w_l, w_r):
+    logp = logits_pos.log_softmax (dim = -1)
+    left_lp = logp.gather (-1, l_idx.unsqueeze (-1)).squeeze (-1)
+    right_lp = logp.gather (-1, r_idx.unsqueeze (-1)).squeeze (-1)
+    loss = -(w_l * left_lp + w_r * right_lp)
+    return loss.mean ()
+
 #box ops (IoU)
 
 def box_iou_xyxy (a, b):
@@ -1179,8 +1220,6 @@ def box_iou_xyxy (a, b):
 
 def iou_loss (predict_xyxy, target_xyxy):
     return 1.0 - box_iou_xyxy (predict_xyxy, target_xyxy)
-
-#center-prior assigner (top-k) + target builder
 
 def _make_level_grids (image_size, strides, device):
     levels = []
@@ -1202,108 +1241,187 @@ def _make_level_grids (image_size, strides, device):
     return levels
 
 @torch.no_grad ()
-def build_targets_center_prior (
-    targets,
-    num_classes : int,
-    image_size : int,
-    strides : list,
-    topk : int = 10,
-    center_radius : float = 2.5,
-    device = None,
+def build_targets_task_aligned (
+    cls_outs,
+    box_outs,
+    strides,
+    gt_classes,
+    gt_boxes_xyxy,
+    image_size,
 ):
-
-    B = len (targets ["image_id"])
-    if device is None:
-        device = targets ["boxes"].device if torch.is_tensor (targets ["boxes"]) else torch.device ("cpu")
-
-    levels = _make_level_grids (image_size, strides, device)
-    per_image = []
-
-    M = targets ["boxes"].shape [0]
-    bidx = targets ["batch_index"].to (device) if torch.is_tensor (targets ["batch_index"]) \
-           else torch.tensor ([], dtype = torch.long, device = device)
-    boxes_all  = targets ["boxes"].to (device).float () if M else torch.zeros ((0, 4), device = device)
-    labels_all = targets ["labels"].to (device).long ()  if M else torch.zeros ((0,), dtype = torch.long, device = device)
-
-    centers_x_all = torch.cat ([L ["cx"] for L in levels], dim = 0)
-    centers_y_all = torch.cat ([L ["cy"] for L in levels], dim = 0)
-    N = centers_x_all.numel ()
-
-    for i in range (B):
-        sel = (bidx == i)
-        gt = boxes_all [sel]
-        gc = labels_all [sel]
-        Gi = gt.shape [0]
-
-        position_mask    = torch.zeros (N, dtype = torch.bool, device = device)
-        t_box_letterbox  = torch.zeros (N, 4, device = device)
-        t_box_xyxy       = torch.zeros (N, 4, device = device)
-        t_cls            = torch.zeros (N, num_classes, device = device)
-        matched_gt_index = torch.full ((N,), -1, dtype = torch.long, device = device)
-
-        if Gi == 0:
-            per_image.append ((t_cls, t_box_letterbox, t_box_xyxy, position_mask, matched_gt_index))
+    '''
+    taa
+    alignment score = (sigmoid (cls)[gt]) ** alpha * (IoU (pred, gt)) ** beta
+    return(per image):
+    t_cls_soft: [P, C]
+    t_box_xyxy: [P, 4]
+    t_box_ltrb: [P, 4]
+    pos_index: [P]
+    _levels: list of dict with H,W,stride...
+    '''
+    
+    device = cls_outs [0].device
+    B = cls_outs [0].shape [0]
+    C = cls_outs [0].shape [1]
+    
+    levels = []
+    start = 0
+    grids = []
+    
+    for (cl, s) in zip (cls_outs, strides):
+        _, _, H, W = cl.shape
+        levels.append ({
+            "H": H, "W": W, "stride": s,
+            "start": start,
+            "end": start + H * W,
+        })
+        cx, cy = make_grid (H, W, s, device)
+        grids.append ((cx, cy))
+        start +=  H * W
+        
+    tal_alpha = float (CFG.get ("tal_alpha", 1.0))
+    tal_beta  = float (CFG.get ("tal_beta", 6.0))
+    tal_topk  = int (CFG.get ("tal_topk", 10))
+    tal_cr = float (CFG.get ("tal_center_radius", 2.5))
+    
+    per_image_targets = []
+    for b in range (B):
+        cls_per_image = []
+        for cl in cls_outs:
+            cls_per_image.append (cl [b].permute (1, 2, 0).reshape (-1, C))
+        cls_flat = torch.cat (cls_per_image, dim = 0)
+        N_total = cls_flat.shape [0]
+        
+        gtc = gt_classes [b]
+        gtb = gt_boxes_xyxy [b]
+        Ng = int (gtc.numel ())
+        
+        if Ng == 0:
+            per_image_targets.append ({
+                "t_cls_soft" : torch.zeros (0, C, device = device),
+                "t_box_xyxy" : torch.zeros (0, 4, device = device),
+                "t_box_ltrb" : torch.zeros (0, 4, device = device),
+                "pos_index"  : torch.zeros (0, dtype = torch.long, device = device),
+            })
             continue
+        
+        pred_xyxy_levels = []
+        for (bx, level, (cx, cy)) in zip (box_outs, levels, grids):
+            H= level ["H"]
+            W= level ["W"]
+            s= level ["stride"]
+            bl = bx [b]
+            M1 = bl.shape [0] // 4
+            #[N, 4, M + 1]
+            bl = bl.view (4, M1, H, W).permute (2, 3, 0, 1).reshape (H * W, 4, M1)
+            probs = bl.softmax (dim = -1)
+            proj = torch.arange (M1, device = device, dtype = bl.dtype)
+            dists = (probs * proj).sum (dim = -1) * float (s)
+            
+            cx_level = cx
+            cy_level = cy
+            
+            x1 = cx_level - dists [:, 0]
+            y1 = cy_level - dists [:, 1]
+            x2 = cx_level + dists [:, 2]
+            y2 = cy_level + dists [:, 3]
+            xyxy = torch.stack ([x1, y1, x2, y2], dim = -1).clamp_ (0, image_size)
+            pred_xyxy_levels.append (xyxy)
+            
+        pred_xyxy = torch.cat (pred_xyxy_levels, dim = 0)
+        
+        candidate_mask = torch.zeros (N_total, dtype = torch.bool, device = device)
+        for level, (cx, cy) in enumerate (grids):
+            H, W, s = levels [level]["H"], levels [level]["W"], levels [level]["stride"]
+            start, end = levels [level]["start"], levels [level]["end"]
+            Nl = H * W
+            
+            if tal_cr > 0:
+                gt_centers = 0.5 * (gtb [:, :2] + gtb [:, 2 :])
+                half = tal_cr * s
+                x1c = gt_centers [:, 0] - half
+                y1c = gt_centers [:, 1] - half
+                x2c = gt_centers [:, 0] + half
+                y2c = gt_centers [:, 1] + half
+                center_boxes = torch.stack ((x1c, y1c, x2c, y2c), dim = -1)
+                cxv = cx.view (Nl, 1)
+                cyv = cy.view (Nl, 1)
+                #[Nl, Ng]
+                in_center = (cxv >= center_boxes [:, 0]) & (cyv >= center_boxes [:, 1]) & (cxv <= center_boxes [:, 2]) & (cyv <= center_boxes [:, 3])
+                candidate_mask [start : end] |= in_center
+            else:
+                cxv = cx.view (Nl, 1)
+                cyv = cy.view (Nl, 1)
+                in_box = (cxv >= gtb [:, 0]) & (cyv >= gtb [:, 1]) & (cxv <= gtb [:, 2]) & (cyv <= gtb [:, 3])
+                candidate_mask [start : end] |= in_box
+                
+        cls_sigmoid = cls_flat.sigmoid ()
+        cls_gt_scores = cls_sigmoid [:, gtc]
+        
+        iou_matrix = box_iou_xyxy (pred_xyxy, gtb)
+        
+        align = (cls_gt_scores.clamp_ (min = 1e-9).pow (tal_alpha)) * (iou_matrix.clamp_ (min = 1e-9).pow (tal_beta))
+        align = torch.where (candidate_mask, align, torch.full_like (align, -1e-9))
+        
+        k = min (tal_topk, align.shape [0])
+        topk_scores, topk_index = torch.topk (align, k, dim = 0)
+        
+        best_gt_per_pred = torch.full ((N_total, ), -1, dtype = torch.long, device = device)
+        best_score_per_pred = torch.full ((N_total, ), -1e-9, dtype = align.dtype, device = device)
+        
+        for j in range (Ng):
+            idx_j = topk_index [:, j]
+            score_j = topk_scores [:, j]
+            better = score_j > best_score_per_pred [idx_j]
+            best_gt_per_pred [idx_j [better]] = j
+            best_score_per_pred [idx_j [better]] = score_j [better]
+            
+        pos_mask = best_gt_per_pred >= 0
+        pos_index = torch.nonzero (pos_mask, as_tuple = False).squeeze (1)
+        P = int (pos_index.numel ())
+        
+        if P == 0:
+            per_image_targets.append ({
+                "t_cls_soft" : torch.zeros (0, C, device = device),
+                "t_box_xyxy" : torch.zeros (0, 4, device = device),
+                "t_box_ltrb" : torch.zeros (0, 4, device = device),
+                "pos_index"  : pos_index,
+            })
+            continue
+        
+        gt_index = best_gt_per_pred [pos_index]
+        scores = best_score_per_pred [pos_index].clamp_ (min = 0.0)
+        
+        t_cls_soft = torch.zeros (P, C, device = device)
+        t_cls_soft [torch.arange (P, device = device), gtc [gt_index]] = scores
+        
+        t_box_xyxy = gtb [gt_index]
+        
+        t_box_ltrb = torch.empty (P, 4, device = device)
+        for level_i, level in enumerate (levels):
+            start, end, s = level ["start"], level ["end"], level ["stride"]
+            cx, cy = grids [level_i]
+            in_level = (pos_index >= start) & (pos_index < end)
+            
+            if in_level.any ():
+                index_level = pos_index [in_level] - start
+                centers = torch.stack ((cx [index_level], cy [index_level]), dim = -1)
+                gt_selected = gtb [gt_index [in_level]]
+                
+                l = centers [:, 0] - gt_selected [:, 0]
+                t = centers [:, 1] - gt_selected [:, 1]
+                r = gt_selected [:, 2] - centers [:, 0]
+                b = gt_selected [:, 3] - centers [:, 1]
+                t_box_ltrb [in_level] = torch.stack ((l, t, r, b), dim = -1).clamp_ (min = 0, max = float (image_size))
 
-        start = 0
-        for L in levels:
-            radius = center_radius * L ["stride"]
-            HW     = L ["H"] * L ["W"]
-            cx     = L ["cx"]
-            cy     = L ["cy"]
-
-            gx1 = (gt [:, 0] - radius).clamp_ (0, image_size)
-            gy1 = (gt [:, 1] - radius).clamp_ (0, image_size)
-            gx2 = (gt [:, 2] + radius).clamp_ (0, image_size)
-            gy2 = (gt [:, 3] + radius).clamp_ (0, image_size)
-
-            in_x = (cx.unsqueeze (0) >= gx1.unsqueeze (1)) & (cx.unsqueeze (0) <= gx2.unsqueeze (1))
-            in_y = (cy.unsqueeze (0) >= gy1.unsqueeze (1)) & (cy.unsqueeze (0) <= gy2.unsqueeze (1))
-            inside = in_x & in_y
-
-            if inside.any ():
-                gcx = (gt [:, 0] + gt [:, 2]) / 2
-                gcy = (gt [:, 1] + gt [:, 3]) / 2
-                dx = torch.abs (cx.unsqueeze (0) - gcx.unsqueeze (1))
-                dy = torch.abs (cy.unsqueeze (0) - gcy.unsqueeze (1))
-                distance = dx + dy
-
-                distance_masked = torch.where (inside, distance, torch.full_like (distance, 1e9))
-                k = min (topk, HW)
-                _, inds = torch.topk (-distance_masked, k=k, dim=1)
-                flat_index = (inds + start).reshape (-1)
-                position_mask [flat_index] = True
-                matched_gt_index [flat_index] = torch.arange (Gi, device = device).unsqueeze (1).expand (-1, k).reshape (-1)
-
-            start += HW
-
-        pos_index = torch.nonzero (position_mask, as_tuple=  False).flatten ()
-
-        if pos_index.numel ():
-            mg = matched_gt_index [pos_index]
-            gt_sel = gt [mg]
-
-            cxp = centers_x_all [pos_index]
-            cyp = centers_y_all [pos_index]
-
-            # LTRB distances
-            l = (cxp - gt_sel [:, 0]).clamp_min (0)
-            t = (cyp - gt_sel [:, 1]).clamp_min (0)
-            r = (gt_sel [:, 2] - cxp).clamp_min (0)
-            b = (gt_sel [:, 3] - cyp).clamp_min (0)
-            t_box_letterbox [pos_index] = torch.stack ([l, t, r, b], dim = 1)
-
-            x1 = cxp - l
-            y1 = cyp - t
-            x2 = cxp + r
-            y2 = cyp + b
-            t_box_xyxy [pos_index] = torch.stack ([x1, y1, x2, y2], dim = 1)
-
-            t_cls [pos_index, gc [mg]] = 1.0
-
-        per_image.append ((t_cls, t_box_letterbox, t_box_xyxy, position_mask, matched_gt_index))
-
-    return per_image, levels
+        per_image_targets.append ({
+            "t_cls_soft" : t_cls_soft,
+            "t_box_xyxy" : t_box_xyxy,
+            "t_box_ltrb" : t_box_ltrb,
+            "pos_index"  : pos_index,
+        })
+    
+    return per_image_targets, levels
 
 def sigmoid_focal_loss(logits, targets, alpha=0.25, gamma=2.0, reduction="sum"):
     # logits, targets: same shape
@@ -1320,81 +1438,116 @@ def sigmoid_focal_loss(logits, targets, alpha=0.25, gamma=2.0, reduction="sum"):
         return loss.mean()
     return loss
 
-class DetectionLoss(nn.Module):
-    def __init__(self, num_classes, image_size, strides, lambda_box=2.5, lambda_cls=1.0):
-        super().__init__()
+#loss writing
+class DetectionLoss (nn.Module):
+    def __init__ (self, num_classes, image_size, strides, lambda_box = 2.5, lambda_cls = 1.0):
+        super ().__init__ ()
         self.num_classes = num_classes
         self.image_size = image_size
         self.strides = strides
         self.lambda_box = lambda_box
         self.lambda_cls = lambda_cls
 
-    def forward(self, head_out, targets):
-        cls_outs = head_out["cls"]
-        box_outs = head_out["box"]
-        strides  = head_out["strides"]
+    def forward (self, head_out, targets):
+        cls_outs = head_out ["cls"]
+        box_outs = head_out ["box"]
+        strides  = head_out ["strides"]
 
-        device = cls_outs[0].device
-        scores_list, boxes_list = flatten_head_outputs(cls_outs, box_outs, strides, self.image_size)
+        device = cls_outs [0].device
+        scores_list, boxes_list = flatten_head_outputs (cls_outs, box_outs, strides, self.image_size)
 
-        per_image_targets, _levels = build_targets_center_prior(
-            targets,
-            num_classes=self.num_classes,
-            image_size=self.image_size,
-            strides=self.strides,
-            topk=10,
-            center_radius=2.5,
-            device=device,
+        per_image_targets, _levels = build_targets_task_aligned (
+            cls_outs,
+            box_outs,
+            strides,
+            targets ["classes"],
+            targets ["boxes_xyxy"],
+            self.image_size,
         )
 
-        total_loss   = torch.zeros((), device=device)
-        loss_box_sum = torch.zeros((), device=device)
-        loss_cls_sum = torch.zeros((), device=device)
+        total_loss   = torch.zeros ((), device = device)
+        loss_box_sum = torch.zeros ((), device = device)
+        loss_cls_sum = torch.zeros ((), device = device)
         num_pos_sum  = 0
 
-        for i in range(len(scores_list)):
-            img_scores = scores_list[i]  # (N, C)
-            img_boxes  = boxes_list[i]   # (N, 4)
-            t_cls, t_box_letterbox, t_box_xyxy, position_mask, matched_gt_index = per_image_targets[i]
+        for i in range (len (scores_list)):
+            img_scores = scores_list [i]
+            img_boxes  = boxes_list [i]
+            t_cls, t_box_letterbox, t_box_xyxy, position_mask, matched_gt_index = per_image_targets [i]
 
-            pos_index = torch.nonzero(position_mask, as_tuple=False).flatten()
-            num_pos   = pos_index.numel()
+            pos_index = torch.nonzero (position_mask, as_tuple = False).flatten ()
+            num_pos   = pos_index.numel ()
             num_pos_sum += num_pos
 
-            # --- classification loss: positives only, matched class only ---
-            if num_pos:
-                # class id from one-hot targets
-                cls_ids    = t_cls[pos_index].argmax(dim=1)          # (P,)
-                logits_pos = img_scores[pos_index, cls_ids]          # (P,)
-                targets_pos= torch.ones_like(logits_pos)             # positives = 1
-                loss_cls   = F.binary_cross_entropy_with_logits(logits_pos, targets_pos, reduction="mean")
-            else:
-                loss_cls = img_scores.new_zeros(())
+            loss_dfl_sum = img_scores.new_zeros (())
+            start = 0
+            reg_max = CFG.get ("reg_max", 16)
 
-            # --- box loss: positives only (IoU on decoded xyxy) ---
-            if num_pos:
-                pred_boxes_pos   = img_boxes[pos_index]
-                target_boxes_pos = t_box_xyxy[pos_index]
-                # mean over positives
-                loss_box = iou_loss(pred_boxes_pos, target_boxes_pos).mean()
-            else:
-                loss_box = img_boxes.new_zeros(())
+            for L, box_logits_lvl in zip (_levels, box_outs):
+                HW, s = L ["H"] * L ["W"], L ["stride"]
 
-            total_loss   = total_loss   + self.lambda_cls * loss_cls + self.lambda_box * loss_box
-            loss_box_sum = loss_box_sum + loss_box
-            loss_cls_sum = loss_cls_sum + loss_cls
+                mask_lvl = (pos_index >= start) & (pos_index < start + HW)
+                if mask_lvl.any ():
+                    idx_flat = pos_index [mask_lvl] - start
 
-        B = len(scores_list)
-        total_loss   = total_loss   / max(1, B)
-        loss_box_sum = loss_box_sum / max(1, B)
-        loss_cls_sum = loss_cls_sum / max(1, B)
-        num_pos_avg  = num_pos_sum  / max(1, B)
+                    bl  = box_logits_lvl [i]
+                    M1  = bl.shape [0] // 4
+                    bl  = bl.view (4, M1, L ["H"], L ["W"]).permute (2, 3, 0, 1).reshape (HW, 4, M1)
+
+                    logits_pos = bl [idx_flat]
+
+                    t_ltrb = t_box_letterbox [pos_index [mask_lvl]]
+
+                    l_idx, r_idx, w_l, w_r = dfl_targets (t_ltrb, stride = s, reg_max = reg_max)
+                    loss_dfl_sum = loss_dfl_sum + dfl_loss_from_logits (logits_pos, l_idx, r_idx, w_l, w_r)
+
+                start += HW
+
+            total_loss = total_loss + 0.5 * loss_dfl_sum
+        
+        if num_pos:
+            cls_ids    = t_cls [pos_index].argmax (dim = 1)
+            logits_pos = img_scores [pos_index, cls_ids]
+            targets_pos= torch.ones_like (logits_pos) #pos = 1
+            loss_cls   = F.binary_cross_entropy_with_logits (logits_pos, targets_pos, reduction = "mean")
+        else:
+            loss_cls = img_scores.new_zeros (())
+
+        if num_pos:
+            pred_boxes_pos   = img_boxes [pos_index]
+            target_boxes_pos = t_box_xyxy [pos_index]
+            # mean over positives
+            loss_box = iou_loss (pred_boxes_pos, target_boxes_pos).mean ()
+        else:
+            loss_box = img_boxes.new_zeros (() )
+
+        total_loss   = total_loss + self.lambda_cls * loss_cls + self.lambda_box * loss_box
+        loss_box_sum = loss_box_sum + loss_box
+        loss_cls_sum = loss_cls_sum + loss_cls
+
+        B = len (scores_list)
+        total_loss   = total_loss   / max (1, B)
+        loss_box_sum = loss_box_sum / max (1, B)
+        loss_cls_sum = loss_cls_sum / max (1, B)
+        num_pos_avg  = num_pos_sum  / max (1, B)
 
         return total_loss, {
             "loss_box": loss_box_sum,
             "loss_cls": loss_cls_sum,
             "num_pos":  num_pos_avg,
         }
+        
+
+# quick DFL smoke test
+M = CFG["reg_max"] + 1
+P = 5
+logits = torch.randn(P, 4, M, requires_grad=True)  # fake head logits
+target_ltrb_px = torch.tensor([[3.2, 7.7, 1.1, 0.0]]*P)  # pixels
+stride = 1
+l_idx, r_idx, w_l, w_r = dfl_targets(target_ltrb_px, stride, CFG["reg_max"])
+loss = dfl_loss_from_logits(logits, l_idx, r_idx, w_l, w_r)
+loss.backward()
+print("DFL test OK:", float(loss) > -1e9 and logits.grad is not None)
 
 with torch.no_grad():
     for conv in model.head.cls_preds:
