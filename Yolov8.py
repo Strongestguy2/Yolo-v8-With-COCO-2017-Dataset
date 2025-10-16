@@ -1195,6 +1195,7 @@ Stage 6
 
 def dfl_targets (ltrb_pixels, stride, reg_max : int):
     x = (ltrb_pixels / float (stride)).clamp_ (0.0, float (reg_max))
+    x = x.to (ltrb_pixels.device)
     l = x.floor ().clamp_ (max = float (reg_max)).long ()
     r = (l + 1).clamp_ (max = reg_max)
     w_r = (x - l.float ())
@@ -1462,87 +1463,93 @@ class DetectionLoss (nn.Module):
         device = cls_outs [0].device
         scores_list, boxes_list = flatten_head_outputs (cls_outs, box_outs, strides, self.image_size)
 
+        B = cls_outs [0].shape [0]
+        
+        if "classes" in targets and "boxes_xyxy" in targets and isinstance (targets ["classes"], list):
+            gt_classes = targets ["classes"].to (device)
+            gt_boxes_xyxy = targets ["boxes_xyxy"].to (device)
+        else:
+            boxes = targets ["boxes"].to (device)
+            labels = targets ["labels"].to (device)
+            batch_index = targets ["batch_index"].to (device)
+            gt_boxes_xyxy = [boxes [batch_index == i].to (device) for i in range (B)]
+            gt_classes = [labels [batch_index == i].to (device) for i in range (B)]
+
         per_image_targets, _levels = build_targets_task_aligned (
             cls_outs,
             box_outs,
             strides,
-            targets ["classes"],
-            targets ["boxes_xyxy"],
+            gt_classes,
+            gt_boxes_xyxy,
             self.image_size,
         )
 
         total_loss   = torch.zeros ((), device = device)
         loss_box_sum = torch.zeros ((), device = device)
         loss_cls_sum = torch.zeros ((), device = device)
+        loss_dfl_sum = torch.zeros ((), device = device)
         num_pos_sum  = 0
 
         for i in range (len (scores_list)):
             img_scores = scores_list [i]
             img_boxes  = boxes_list [i]
-            t_cls, t_box_letterbox, t_box_xyxy, position_mask, matched_gt_index = per_image_targets [i]
+            t = per_image_targets [i]
+            
+            pos_index = t ["pos_index"]
+            t_cls_soft = t ["t_cls_soft"]
+            t_box_xyxy = t ["t_box_xyxy"]
+            t_box_letterbox = t ["t_box_ltrb"]
+            P = int (pos_index.numel ())
+            num_pos_sum += P
 
-            pos_index = torch.nonzero (position_mask, as_tuple = False).flatten ()
-            num_pos   = pos_index.numel ()
-            num_pos_sum += num_pos
+            if P > 0:
+                pos_scores = img_scores [pos_index]
+                loss_cls = F.binary_cross_entropy_with_logits (pos_scores, t_cls_soft, reduction = "mean")
+                loss_cls_sum = loss_cls_sum + loss_cls
+                
+                #box iou loss
+                pred_boxes_pos = img_boxes [pos_index]
+                target_boxes_pos = t_box_xyxy
+                loss_box = iou_loss (pred_boxes_pos, target_boxes_pos).mean ()
+                loss_box_sum = loss_box_sum + loss_box
+                
+                #dfl loss
+                start = 0
+                reg_max = CFG.get ("reg_max", 16)
+                for L, box_logits_level in zip (_levels, box_outs):
+                    HW = L ["H"] * L ["W"]
+                    s = L ["stride"]
+                    mask_level = (pos_index >= start) & (pos_index < start + HW)
+                    
+                    if mask_level.any ():
+                        index_flat = pos_index [mask_level] - start
+                        bl = box_logits_level [i]
+                        M1 = bl.shape [0] // 4
+                        bl = bl.view (4, M1, L ["H"], L ["W"]).permute (2, 3, 0, 1).reshape (HW, 4, M1)
+                        logits_pos = bl [index_flat]
 
-            loss_dfl_sum = img_scores.new_zeros (())
-            start = 0
-            reg_max = CFG.get ("reg_max", 16)
-
-            for L, box_logits_lvl in zip (_levels, box_outs):
-                HW, s = L ["H"] * L ["W"], L ["stride"]
-
-                mask_lvl = (pos_index >= start) & (pos_index < start + HW)
-                if mask_lvl.any ():
-                    idx_flat = pos_index [mask_lvl] - start
-
-                    bl  = box_logits_lvl [i]
-                    M1  = bl.shape [0] // 4
-                    bl  = bl.view (4, M1, L ["H"], L ["W"]).permute (2, 3, 0, 1).reshape (HW, 4, M1)
-
-                    logits_pos = bl [idx_flat]
-
-                    t_ltrb = t_box_letterbox [pos_index [mask_lvl]]
-
-                    l_idx, r_idx, w_l, w_r = dfl_targets (t_ltrb, stride = s, reg_max = reg_max)
-                    loss_dfl_sum = loss_dfl_sum + dfl_loss_from_logits (logits_pos, l_idx, r_idx, w_l, w_r)
-
-                start += HW
-
-            total_loss = total_loss + 0.5 * loss_dfl_sum
+                        t_ltrb = t_box_letterbox [mask_level].to (device)
+                        l_index, r_index, w_l, w_r = dfl_targets (t_ltrb, stride = s, reg_max = reg_max)
+                        loss_dfl_sum = loss_dfl_sum + dfl_loss_from_logits (logits_pos, l_index, r_index, w_l, w_r)
+                    start += HW
+            else:
+                #keep shapes and dtypes happy
+                loss_cls_sum = loss_cls_sum + img_scores.new_zeros (())
+                loss_box_sum = loss_box_sum + img_scores.new_zeros (())
+                continue
         
-        if num_pos:
-            cls_ids    = t_cls [pos_index].argmax (dim = 1)
-            logits_pos = img_scores [pos_index, cls_ids]
-            targets_pos= torch.ones_like (logits_pos) #pos = 1
-            loss_cls   = F.binary_cross_entropy_with_logits (logits_pos, targets_pos, reduction = "mean")
-        else:
-            loss_cls = img_scores.new_zeros (())
-
-        if num_pos:
-            pred_boxes_pos   = img_boxes [pos_index]
-            target_boxes_pos = t_box_xyxy [pos_index]
-            # mean over positives
-            loss_box = iou_loss (pred_boxes_pos, target_boxes_pos).mean ()
-        else:
-            loss_box = img_boxes.new_zeros (() )
-
-        total_loss   = total_loss + self.lambda_cls * loss_cls + self.lambda_box * loss_box
-        loss_box_sum = loss_box_sum + loss_box
-        loss_cls_sum = loss_cls_sum + loss_cls
-
         B = len (scores_list)
-        total_loss   = total_loss   / max (1, B)
-        loss_box_sum = loss_box_sum / max (1, B)
-        loss_cls_sum = loss_cls_sum / max (1, B)
-        num_pos_avg  = num_pos_sum  / max (1, B)
-
-        return total_loss, {
-            "loss_box": loss_box_sum,
-            "loss_cls": loss_cls_sum,
-            "num_pos":  num_pos_avg,
-        }
+        loss_cls_mean = loss_cls_sum / max (1, B)
+        loss_box_mean = loss_box_sum / max (1, B)
+        loss_dfl_mean = loss_dfl_sum / max (1, num_pos_sum)
         
+        total_loss = self.lambda_cls * loss_cls_mean + self.lambda_box * loss_box_mean + 0.5 * loss_dfl_mean
+        
+        return total_loss, {
+            "loss_box" : loss_box_mean,
+            "loss_cls" : loss_cls_mean,
+            "num_pos" : num_pos_sum / max (1, B),
+        }
 
 # quick DFL smoke test
 M = CFG["reg_max"] + 1
