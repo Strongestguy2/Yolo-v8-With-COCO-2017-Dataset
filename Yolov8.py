@@ -126,7 +126,7 @@ CFG = {
     "grad_clip_norm" : 10.0,
     "ema_decay" : 0.9998,
 
-    "region_max" : 16,
+    "reg_max" : 16,
     "assigner" : "center_prior",
     "iou_type" : "ciou",
     "loss_weights" : {"box" : 2.5, "cls" : 1.0, "obj" : 1.0, "dfl" : 0.0},
@@ -868,8 +868,6 @@ print ("✅ Sanity check done.")
 Stage 4: Finally the actual model, Backbone
 
 
-#the fun part - backbone and fpn finally!!!!!!!!!!
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
@@ -929,33 +927,41 @@ class ConvBNAct (nn.Module):
     def forward (self, x):
         return self.act (self.bn (self.conv (x)))
 
-class FPN (nn.Module):
-    #minimal(yes i know minimal) produce p3, p4, p5 (all out_ch)
-    #input (c3, c4, c5)
-
+class PAFPN (nn.Module):
+    #PANet
+    #td: l5->p5;p4=l4+up(p5);p3=;3+up(p4)
+    #bu: n4=p4_down(n3);np=p5+down(n4)
+    
     def __init__ (self, c3, c4, c5, out_ch = 256):
         super ().__init__ ()
-
+        
         self.l3 = nn.Conv2d (c3, out_ch, 1, 1, 0)
         self.l4 = nn.Conv2d (c4, out_ch, 1, 1, 0)
         self.l5 = nn.Conv2d (c5, out_ch, 1, 1, 0)
-
+        
         self.p3 = ConvBNAct (out_ch, out_ch, 3, 1)
         self.p4 = ConvBNAct (out_ch, out_ch, 3, 1)
         self.p5 = ConvBNAct (out_ch, out_ch, 3, 1)
-
+        
+        self.down3 = ConvBNAct (out_ch, out_ch, 3, 2)
+        self.down4 = ConvBNAct (out_ch, out_ch, 3, 2)
+        self.n4 = ConvBNAct (out_ch, out_ch, 3, 1)
+        self.n5 = ConvBNAct (out_ch, out_ch, 3, 1)
+        
     def forward (self, c3, c4, c5):
-      import torch.nn.functional as F
-      p5 = self.l5 (c5)
-      p4 = self.l4 (c4) + F.interpolate (p5, size = c4.shape [-2:], mode = "nearest")
-      p3 = self.l3 (c3) + F.interpolate (p4, size = c3.shape [-2:], mode = "nearest")
-
-      p5 = self.p5 (p5)
-      p4 = self.p4 (p4)
-      p3 = self.p3 (p3)
-
-      return p3, p4, p5
-
+        p5 = self.l5 (c5)
+        p4 = self.l4 (c4) + F.interpolate (p5, size = c4.shape [-2:], mode = "nearest")
+        p3 = self.l3 (c3) + F.interpolate (p4, size = c3.shape [-2:], mode = "nearest")
+        p5 = self.p5 (p5)
+        p4 = self.p4 (p4)
+        p3 = self.p3 (p3)
+        
+        n3 = p3
+        n4 = self.n4 (p4 + self.down3 (n3))
+        n5 = self.n5 (p5 + self.down4 (n4))
+        
+        return n3, n4, n5
+    
 class Integral (nn.Module):
     def __init__ (self, reg_max : int):
         super ().__init__ ()
@@ -1011,7 +1017,7 @@ class YoloModel (nn.Module):
         assert backbone == "resnet50_fpn", "only resnet50_fpn wired in this mvp"
         self.backbone = ResNet50Backbone (pretrained = False)
         #channel dims for resnet50, c3, c4, c5
-        self.neck = FPN (c3 = 512, c4 = 1024, c5 = 2048, out_ch = fpn_out)
+        self.neck = PAFPN (c3 = 512, c4 = 1024, c5 = 2048, out_ch = fpn_out)
         self.head = YoloV8LiteHead (in_ch = fpn_out, num_classes = num_classes, hidden = head_hidden, num_levels  = 3)
         self.strides = [8, 16, 32]
 
