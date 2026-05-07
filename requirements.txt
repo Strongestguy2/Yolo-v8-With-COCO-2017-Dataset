@@ -1,0 +1,12 @@
+torch
+torchvision
+fiftyone
+opencv-python
+PyYAML
+tqdm
+numpy
+matplotlib
+psutil
+pynvml
+gradio
+pytest
