@@ -16,10 +16,17 @@ from .data import build_dataloaders
 from .evaluate import evaluate_loss
 from .loss import YoloLoss
 from .model import build_model
+from .visualize import save_comparison_image, select_image_targets
 from .utils import Stopwatch, get_device, set_seed
 
 
-def train(cfg: dict[str, Any], resume: bool = False, max_steps: int | None = None, max_hours: float | None = None) -> Path:
+def train(
+    cfg: dict[str, Any],
+    resume: bool = False,
+    max_steps: int | None = None,
+    max_hours: float | None = None,
+    save_checkpoints: bool = True,
+) -> Path:
     set_seed(int(cfg.get("seed", 42)))
     device = get_device(str(cfg.get("device", "auto")))
     run_dir = resolve_run_dir(cfg)
@@ -61,26 +68,40 @@ def train(cfg: dict[str, Any], resume: bool = False, max_steps: int | None = Non
     stopwatch = Stopwatch()
     steps_this_run = 0
     last_checkpoint_time = time.time()
+    images_since_visual = 0
     grad_accum = int(cfg["train"].get("grad_accum", 1))
     checkpoint_steps = int(cfg["train"].get("checkpoint_steps", 100))
     checkpoint_minutes = float(cfg["train"].get("checkpoint_minutes", 15))
     max_grad_norm = float(cfg["train"].get("grad_clip_norm", 10.0))
+    vis_every_images = int(cfg["train"].get("vis_every_images", 0))
+    vis_max_images = int(cfg["train"].get("vis_max_images", 2))
+    vis_conf_threshold = float(cfg["train"].get("vis_conf_threshold", 0.25))
+    vis_iou_threshold = float(cfg["train"].get("vis_iou_threshold", 0.45))
+    class_names = cfg.get("classes") or cfg.get("model", {}).get("class_names")
+    visual_dir = run_dir / "visuals"
+    stop_file = cfg["train"].get("stop_file")
+    stop_path = Path(stop_file) if stop_file else None
+    current_epoch = start_epoch
 
     try:
         for epoch in range(start_epoch, int(cfg["train"]["epochs"])):
+            current_epoch = epoch
             model.apply_freeze_schedule(epoch)
             model.train()
             optimizer.zero_grad(set_to_none=True)
             pbar = tqdm(train_loader, desc=f"epoch {epoch + 1}/{cfg['train']['epochs']}")
             for batch_idx, (images, targets) in enumerate(pbar):
+                if stop_requested(stop_path):
+                    if save_checkpoints:
+                        save_safe_stop(checkpoint_dir, model, optimizer, scheduler, scaler, cfg, epoch, global_step, best_metric)
+                    return run_dir
                 if max_steps is not None and steps_this_run >= max_steps:
-                    save_last(last_path, model, optimizer, scheduler, scaler, cfg, epoch, global_step, best_metric)
+                    if save_checkpoints:
+                        save_last(last_path, model, optimizer, scheduler, scaler, cfg, epoch, global_step, best_metric)
                     return run_dir
                 if stopwatch.exceeded_hours(max_hours):
-                    save_training_checkpoint(
-                        checkpoint_dir / "safe_stop.pt",
-                        **checkpoint_payload(model, optimizer, scheduler, scaler, cfg, epoch, global_step, best_metric),
-                    )
+                    if save_checkpoints:
+                        save_safe_stop(checkpoint_dir, model, optimizer, scheduler, scaler, cfg, epoch, global_step, best_metric)
                     return run_dir
 
                 step_start = time.time()
@@ -125,30 +146,54 @@ def train(cfg: dict[str, Any], resume: bool = False, max_steps: int | None = Non
                 should_checkpoint = global_step > 0 and (
                     global_step % checkpoint_steps == 0 or (time.time() - last_checkpoint_time) >= checkpoint_minutes * 60
                 )
-                if should_checkpoint:
+                if save_checkpoints and should_checkpoint:
                     save_last(last_path, model, optimizer, scheduler, scaler, cfg, epoch, global_step, best_metric)
                     last_checkpoint_time = time.time()
+
+                images_since_visual += images.shape[0]
+                if vis_every_images > 0 and images_since_visual >= vis_every_images:
+                    preview_outputs: dict[str, Any] = {}
+                    for key, value in outputs.items():
+                        if key in {"cls", "obj", "box"} and isinstance(value, list):
+                            preview_outputs[key] = [tensor.detach() for tensor in value]
+                        else:
+                            preview_outputs[key] = value
+                    save_training_preview(
+                        visual_dir,
+                        epoch=epoch + 1,
+                        global_step=global_step,
+                        images=images.detach().cpu(),
+                        targets={k: v.detach().cpu() for k, v in moved_targets.items()},
+                        outputs=preview_outputs,
+                        class_names=class_names,
+                        conf_threshold=vis_conf_threshold,
+                        iou_threshold=vis_iou_threshold,
+                        max_images=vis_max_images,
+                    )
+                    images_since_visual = 0
+                if stop_requested(stop_path):
+                    if save_checkpoints:
+                        save_safe_stop(checkpoint_dir, model, optimizer, scheduler, scaler, cfg, epoch, global_step, best_metric)
+                    return run_dir
 
             val_stats = evaluate_loss(model, criterion, val_loader, device, max_batches=int(cfg["train"].get("val_max_batches", 20)))
             metric = val_stats["loss"]
             if best_metric is None or metric < best_metric:
                 best_metric = metric
-                save_training_checkpoint(
-                    checkpoint_dir / "best.pt",
-                    **checkpoint_payload(model, optimizer, scheduler, scaler, cfg, epoch + 1, global_step, best_metric),
-                )
-            save_last(last_path, model, optimizer, scheduler, scaler, cfg, epoch + 1, global_step, best_metric)
+                if save_checkpoints:
+                    save_training_checkpoint(
+                        checkpoint_dir / "best.pt",
+                        **checkpoint_payload(model, optimizer, scheduler, scaler, cfg, epoch + 1, global_step, best_metric),
+                    )
+            if save_checkpoints:
+                save_last(last_path, model, optimizer, scheduler, scaler, cfg, epoch + 1, global_step, best_metric)
     except KeyboardInterrupt:
-        save_training_checkpoint(
-            checkpoint_dir / "safe_stop.pt",
-            **checkpoint_payload(model, optimizer, scheduler, scaler, cfg, start_epoch, global_step, best_metric),
-        )
+        if save_checkpoints:
+            save_safe_stop(checkpoint_dir, model, optimizer, scheduler, scaler, cfg, current_epoch, global_step, best_metric)
     except RuntimeError as exc:
         if "out of memory" in str(exc).lower():
-            save_training_checkpoint(
-                checkpoint_dir / "safe_stop.pt",
-                **checkpoint_payload(model, optimizer, scheduler, scaler, cfg, start_epoch, global_step, best_metric),
-            )
+            if save_checkpoints:
+                save_safe_stop(checkpoint_dir, model, optimizer, scheduler, scaler, cfg, current_epoch, global_step, best_metric)
         raise
     return run_dir
 
@@ -195,6 +240,24 @@ def save_last(
     save_training_checkpoint(path, **checkpoint_payload(model, optimizer, scheduler, scaler, cfg, epoch, global_step, best_metric))
 
 
+def save_safe_stop(
+    checkpoint_dir: Path,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    scaler: GradScaler,
+    cfg: dict[str, Any],
+    epoch: int,
+    global_step: int,
+    best_metric: float | None,
+) -> None:
+    save_last(checkpoint_dir / "safe_stop.pt", model, optimizer, scheduler, scaler, cfg, epoch, global_step, best_metric)
+
+
+def stop_requested(stop_path: Path | None) -> bool:
+    return stop_path is not None and stop_path.exists()
+
+
 LOG_FIELDS = [
     "time",
     "epoch",
@@ -226,3 +289,41 @@ def append_log(path: Path, row: dict[str, Any]) -> None:
     with path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=LOG_FIELDS, extrasaction="ignore")
         writer.writerow(row)
+
+
+def save_training_preview(
+    visual_dir: Path,
+    epoch: int,
+    global_step: int,
+    images: torch.Tensor,
+    targets: dict[str, torch.Tensor],
+    outputs: dict[str, Any],
+    class_names: list[str] | None,
+    conf_threshold: float,
+    iou_threshold: float,
+    max_images: int,
+) -> None:
+    from .infer import decode_predictions
+
+    if images.numel() == 0:
+        return
+    visual_dir.mkdir(parents=True, exist_ok=True)
+    predictions = decode_predictions(outputs, conf_threshold=conf_threshold, iou_threshold=iou_threshold, image_size=images.shape[-1])
+    limit = min(int(max_images), images.shape[0])
+    for image_index in range(limit):
+        target_boxes, target_labels = select_image_targets(targets, image_index)
+        pred = predictions[image_index].detach().cpu()
+        pred_boxes = pred[:, :4] if pred.numel() else torch.zeros((0, 4))
+        pred_scores = pred[:, 4] if pred.numel() else torch.zeros(0)
+        pred_labels = pred[:, 5].long() if pred.numel() else torch.zeros(0, dtype=torch.long)
+        output_path = visual_dir / f"epoch_{epoch:03d}_step_{global_step:06d}_img_{image_index:02d}.png"
+        save_comparison_image(
+            output_path,
+            image=images[image_index],
+            target_boxes=target_boxes,
+            target_labels=target_labels,
+            prediction_boxes=pred_boxes,
+            prediction_labels=pred_labels,
+            prediction_scores=pred_scores,
+            class_names=class_names,
+        )

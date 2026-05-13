@@ -11,17 +11,46 @@ python -m venv .venv
 
 ## Main Workflow
 
-Run this repeatedly through the week. It increases the local COCO subset, validates labels, resumes training, and checkpoints progress.
+Use one command for the common path:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\universal_train.py
+```
+
+If you want a very fast local smoke run with no dataset download, use:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\universal_train.py --smoke --max-steps 1
+```
+
+The universal script will prepare COCO automatically when the dataset is missing, resumes by default if a checkpoint exists, and saves progress on Ctrl+C. It also accepts dotted `--set key=value` overrides for almost every training knob, including preview frequency.
+
+## GUI Control Panel
+
+The panel is a lightweight Gradio app that runs next to training instead of inside the hot training step. It can start or stop training, show the newest loss curve from `train_log.csv`, display the latest preview image from `visuals`, and clean project-local Python/test caches.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\panel.py
+```
+
+It opens `http://127.0.0.1:7860` automatically. Use `Start / Resume` to continue an existing run, or `Start New Session` to create a fresh timestamped run folder. Use the preview controls to choose how often training writes visual checks; a larger interval keeps disk and UI overhead lower.
+
+Modes:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\universal_train.py --mode 1
+.\.venv\Scripts\python.exe scripts\universal_train.py --mode 2
+.\.venv\Scripts\python.exe scripts\universal_train.py --mode 3
+```
+
+Mode 1 is a non-saving smoke test for sharing logs. Mode 2 automatically resumes from the latest savepoint or active branch. Mode 3 opens a file picker so you can choose a checkpoint, branch from it, and keep the original run intact.
+
+The lower-level commands still exist if you want them:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\run_pipeline.py --config configs\coco_resnet34.yaml --download-increment 1000 --max-hours 2
-```
-
-Fast smoke test:
-
-```powershell
-.\.venv\Scripts\python.exe scripts\run_pipeline.py --config configs\smoke.yaml --download-increment 20 --max-steps 5
-.\.venv\Scripts\python.exe scripts\train.py --config configs\smoke.yaml --resume --max-steps 2
+.\.venv\Scripts\python.exe scripts\smoke_train.py --max-steps 1
+.\.venv\Scripts\python.exe scripts\promote_branch.py --pick
 ```
 
 ## Inference And Demo
